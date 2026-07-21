@@ -1,285 +1,255 @@
-# SQL Query Assistant
+# Query Bench
 
-**Natural-language SQL powered by OpenAI Codex OAuth + Model Context Protocol (MCP)**
+**Ask questions of a real SQL database using OpenAI Codex and natural language.**
 
-Ask questions about any relational database in plain English. An OpenAI Codex
-model drives a set of **MCP tools** that explore the schema, build and
-validate SQL, and execute it safely — then explains the results.
+Query Bench connects to a user-configured relational database, inspects its live
+schema, generates read-only SQL, validates it, executes it, and explains the
+result. Users can also upload database-specific context—business rules, metric
+definitions, data dictionaries, relationship notes, and example SQL—to improve
+the accuracy of each answer.
 
-## OpenAI Build Week setup
+Built for **OpenAI Build Week**.
 
-1. Start the backend and Angular UI using the existing quick-start steps.
-2. Connect your database in **Settings**.
-3. Open **OpenAI Codex** and select the settings icon.
-4. Select **Sign in with OpenAI**, approve the device code in the browser, and
-   QueryBench will dynamically load the Codex models available to that account.
-5. Open **Database Context** and upload database context such as Markdown
-   schema notes, a CSV data dictionary, JSON/YAML business rules, or example
-   SQL. The file is scoped to the connected database and grounds the next turn.
+![Query Bench](assets/sql-query-bench-devpost-thumbnail.png)
 
-OpenAI OAuth credentials use encrypted-at-rest storage (Windows DPAPI, or AES-GCM
-with `COPILOT_TOKEN_ENC_KEY` on other platforms). Uploaded context is stored
-locally under `server/data/user_contexts/`, excluded from Git, and treated as
-guidance; live schema inspection and query results always take precedence.
+## Why Query Bench?
 
-## Demo Video
+Business users know the questions they want to ask, but they may not know table
+names, join paths, SQL syntax, or database-specific conventions. A one-shot
+text-to-SQL prompt can also produce convincing SQL that uses the wrong field or
+misunderstands a business term such as "net sales."
 
-[Watch the 10-minute QueryBench hackathon demo on youtube](https://youtu.be/bP9VPO2PLC4)
+Query Bench turns text-to-SQL into an observable workflow:
 
+1. Understand the user's question and database context.
+2. Search the live database schema for relevant tables and columns.
+3. Generate a read-only SQL query.
+4. Validate the SQL before execution.
+5. Execute it against the connected database.
+6. Return the SQL, rows, summary, insights, and suggested follow-up questions.
 
-[Watch the 4-minute QueryBench hackathon demo](https://youtu.be/bP9VPO2PLC4)
+## Highlights
 
-This walkthrough shows the agent experience end to end: database context files,
-MCP tool calls, PostGIS/pgvector-aware SQL,
-validation, execution, and the trust panel that explains why the answer can be
-trusted.
+- **Sign in with OpenAI** using OAuth device authorization—no API key entry.
+- **Dynamic model selection** based on the Codex models available to the signed-in account.
+- **Bring your own database** with locally saved connection profiles.
+- **Live schema discovery** instead of relying on a hard-coded schema.
+- **Database Context** uploads for business terminology and organization-specific rules.
+- **Iterative function-calling loop** for discovery, SQL generation, validation, and execution.
+- **Live SSE progress** so users can follow the workflow while Codex is working.
+- **Schema Explorer** for tables, columns, keys, and relationships.
+- **Dashboard and query logs** for status, response time, model, tokens, and estimated cost.
+- **Analytics** for visualizing and exporting query results.
+- **Read-only protection** with validation and single-statement enforcement.
+- PostgreSQL, MySQL, SQL Server, and Oracle support.
 
----
+## Demo
 
-## How It Works
+[Watch the Query Bench demo on YouTube](https://youtu.be/TfStYcYwgA4)
 
-Instead of asking a model to blurt out SQL in one shot, this project runs an
-**agent loop**: the Copilot model is given a toolbox (MCP tools) and decides,
-step by step, how to discover the schema, assemble a query, validate it, and
-run it.
+Suggested demonstration question:
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                      Angular Frontend (UI)                         │
-│   ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐      │
-│   │  Copilot   │ │   Schema   │ │ Dashboard  │ │    Data    │      │
-│   │    Chat    │ │  Explorer  │ │  (Logs)    │ │  Analytics │      │
-│   └────────────┘ └────────────┘ └────────────┘ └────────────┘      │
-│                        HTTP REST API                               │
-└───────────────────────────────┬────────────────────────────────────┘
-                                 │
-┌───────────────────────────────▼────────────────────────────────────┐
-│                       FastAPI Backend (Python)                       │
-│                                                                      │
-│   ┌───────────────── OpenAI Codex Agent Loop ──────────────────┐   │
-│   │  user question                                               │   │
-│   │      │                                                       │   │
-│   │      ▼   model picks tools ──►  MCP tool calls  ──┐          │   │
-│   │   reason ◄──────────── tool results ◄─────────────┘          │   │
-│   │      │   (repeat until the answer is ready)                  │   │
-│   │      ▼                                                       │   │
-│   │   final answer + SQL + rows                                  │   │
-│   └──────────────────────────────────────────────────────────────┘   │
-│                                                                      │
-│   ┌──────────────┐  ┌──────────────┐  ┌───────────────────────────┐ │
-│   │  MCP Server  │  │ Schema Index │  │  Connection / Query Mgmt  │ │
-│   │  (MCP tools) │  │  (optional   │  │  (SQLAlchemy pools)       │ │
-│   │              │  │   FAISS RAG) │  │                           │ │
-│   └──────────────┘  └──────────────┘  └───────────────────────────┘ │
-└───────────────────────────────┬────────────────────────────────────┘
-                                 │
-┌───────────────────────────────▼────────────────────────────────────┐
-│      Your Database  ·  PostgreSQL / MySQL / SQL Server / Oracle      │
-└──────────────────────────────────────────────────────────────────────┘
+> Show me monthly revenue, refunds, discounts, and net sales. Highlight the
+> strongest month and any unusual refund trends.
+
+## Architecture
+
+```text
+Angular UI (localhost:1111)
+        |
+        | REST + Server-Sent Events
+        v
+FastAPI backend (localhost:2222)
+        |
+        +-- OpenAI OAuth and dynamic Codex model discovery
+        +-- Iterative OpenAI function-calling orchestrator
+        +-- Database context service
+        +-- Schema discovery and SQL validation functions
+        +-- Query logging and analytics
+        |
+        v
+SQLAlchemy connection pools
+        |
+        v
+PostgreSQL / MySQL / SQL Server / Oracle
 ```
 
-The same MCP tool surface is also exposed over **stdio** and (optionally) **HTTP**,
-so IDE clients like VS Code, Cursor, or Claude Desktop can use it directly.
+For the web application, the backend converts its registered database tools
+into OpenAI function definitions. Codex chooses a function, the backend executes
+it, returns the result, and repeats the loop until the answer is ready.
 
----
+The same registry is MCP-compatible and can optionally be exposed over stdio or
+Streamable HTTP for external MCP clients. The web chat does not require a
+separate remote MCP connection.
 
-## Database Context Files
-
-Upload Markdown, text, JSON, YAML, CSV, or SQL files containing schema notes,
-business rules, metric definitions, data dictionaries, and example queries.
-Files are stored locally, scoped to the selected database, and automatically
-included in Codex conversations. Live schema inspection remains authoritative.
-
----
-
-## MCP Tools
-
-The agent has access to tools across a few categories:
-
-| Category | Tools |
-|----------|-------|
-| **Discovery** | `search_tables`, `search_columns`, `introspect_schema`, `preview_data`, `sample_column_values` |
-| **Relationships** | `check_relationships`, `discover_join_paths` |
-| **Advanced SQL** | `detect_extensions`, `semantic_data_search` (pgvector) |
-| **SQL lifecycle** | `generate_sql`, `validate_sql`, `execute_sql`, `explain_sql`, `fix_sql` |
-| **Connection** | `connect_database`, `switch_database`, `get_connection_profile`, `analyze_connection_performance`, `validate_server_compatibility`, `check_db_integrity` |
-
-All execution is **SELECT-only** and passes through a SQL validator (injection
-detection, keyword blocking, single-statement enforcement) before it runs.
-
----
-
-## Quick Start
+## OpenAI Build Week quick start
 
 ### Prerequisites
-- **Python 3.10+** (3.13 supported)
-- **Node.js 18+** and npm (Angular 17 requires ≥ 18)
-- A reachable **SQL database** (PostgreSQL, MySQL, SQL Server, or Oracle)
-- An **OpenAI account with Codex access** (authenticated at runtime via OAuth device code)
 
-### Backend Setup
+- Python 3.10 or newer
+- Node.js 18 or newer
+- npm
+- A reachable PostgreSQL, MySQL, SQL Server, or Oracle database
+- An OpenAI account with Codex access
+
+### 1. Clone the repository
+
 ```bash
+git clone https://github.com/iamkiranrajput/query-bench.git
+cd query-bench
+```
+
+### 2. Start the backend
+
+```powershell
 cd server
-
-# Create and activate virtual environment
 python -m venv venv
-.\venv\Scripts\Activate.ps1   # Windows PowerShell
-source venv/bin/activate      # Linux/Mac
-
-# Install dependencies
+.\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env — generate a SECRET_KEY:
-#   python -c "import secrets; print(secrets.token_urlsafe(48))"
-
-# Start server
+Copy-Item .env.example .env
 python main.py
 ```
-Backend: `http://localhost:2222` · API docs: `http://localhost:2222/api/docs`
 
-### Frontend Setup
+For Linux or macOS, activate the environment with:
+
+```bash
+source venv/bin/activate
+```
+
+The API runs at `http://localhost:2222`. Interactive API documentation is
+available at `http://localhost:2222/api/docs`.
+
+### 3. Start the UI
+
+Open another terminal:
+
 ```bash
 cd ui
 npm install
 npm start
 ```
-Frontend: `http://localhost:1111`
 
-> Override ports via `PORT=` in `server/.env` and the `--port` flag in the
-> `start` script of `ui/package.json`.
+Open `http://localhost:1111`.
 
-### Usage
-1. Open `http://localhost:1111`.
-2. Go to **Settings → Database Connections** and connect to your database.
-3. Open **OpenAI Codex**, sign in with your OpenAI account (device-code prompt), and
-   ask questions in natural language.
-4. Use **Schema Explorer**, **Dashboard**, and **Analytics** to browse the
-   schema and review query history.
+### 4. Use Query Bench
 
----
+1. Open **Settings** and add a database connection.
+2. Open **OpenAI Codex** and select the settings icon.
+3. Choose **Sign in with OpenAI** and approve the device code in your browser.
+4. Select one of the Codex models available to your account.
+5. Optionally upload a database context file.
+6. Ask a question in natural language and follow the live progress.
 
-## Demo database (PostGIS + pgvector)
+## Connecting Supabase
 
-A ready-to-run demo database showcases the spatial + semantic features. It seeds
-a sizeable geospatial retail dataset — **100 stores, 5,000 customers, 30,000
-orders, 24 products** (all SRID 4326).
+Supabase's direct database endpoint is IPv6 by default. If your computer or
+hosting environment is IPv4-only, use the **Supavisor Session Pooler** details
+from the Supabase **Connect** dialog:
 
-**Option A — Docker (self-contained):**
+- Host: the supplied `*.pooler.supabase.com` hostname
+- Port: `5432` for session mode
+- Database: usually `postgres`
+- Username: copy the complete pooler username from Supabase
+- Password: enter the raw database password, not its URL-encoded representation
 
-```bash
+Transaction mode on port `6543` is also available for short-lived connections.
+Never commit or publish a database password or connection string.
+
+## Database Context
+
+Upload `.md`, `.txt`, `.json`, `.yaml`, `.csv`, or `.sql` files containing:
+
+- business terminology and abbreviations;
+- metric definitions;
+- table and column descriptions;
+- verified relationships and join paths;
+- data-quality rules; and
+- example SQL.
+
+Files are scoped to the selected database, stored locally under
+`server/data/user_contexts/`, and excluded from Git. Context is treated as
+guidance; the live schema and live query results remain authoritative.
+
+## Function-calling workflow
+
+The Codex orchestration loop can use functions in these categories:
+
+| Category | Examples |
+| --- | --- |
+| Discovery | `search_tables`, `search_columns`, `introspect_schema`, `preview_data` |
+| Relationships | `check_relationships`, `discover_join_paths` |
+| SQL lifecycle | `generate_sql`, `validate_sql`, `execute_sql`, `explain_sql`, `fix_sql` |
+| Database capabilities | `detect_extensions`, `validate_server_compatibility` |
+| Connection context | `switch_database`, `get_connection_profile` |
+
+The backend bounds the number of iterations and the total wall-clock time. Tool
+results are returned to Codex after each step, while progress events are streamed
+to the UI using Server-Sent Events.
+
+## Safety and local data
+
+- AI-generated database execution is restricted to `SELECT` queries.
+- SQL passes through keyword blocking, injection checks, and single-statement validation.
+- Database context files remain local and are excluded from Git.
+- OpenAI OAuth credentials are encrypted at rest using Windows DPAPI or AES-GCM.
+- Database passwords are stored encrypted in the browser's local storage.
+- SSH credentials, when used, are injected by the backend and are not exposed to the model.
+
+Use a read-only database account with the minimum permissions required for the
+tables that Query Bench should access.
+
+### Repository data hygiene
+
+The repository does not include database credentials, OAuth tokens, uploaded
+customer context, query-history databases, or application logs. Local runtime
+files such as `server/.env`, `server/app/data/.copilot_token.json`,
+`server/data/user_contexts/`, `server/data/*.db`, and `server/logs/` are covered
+by Git ignore rules. Review `git status` before every public push and rotate any
+credential that has ever been displayed or shared outside the local machine.
+Before recording or sharing a browser profile, use **Clear All** in Chat History
+to remove locally stored conversations and verify that connection details are
+not visible on screen.
+
+## Demo database
+
+The `demo/` directory includes a PostgreSQL retail dataset with customers,
+orders, products, and stores. PostGIS and pgvector features are optional.
+
+### Docker
+
+```powershell
 cd demo
-$env:POSTGRES_PASSWORD = "<choose-a-strong-password>"   # PowerShell
+$env:POSTGRES_PASSWORD = "<choose-a-strong-password>"
 docker compose up --build -d
-# populate product embeddings for pgvector semantic search:
 $env:DEMO_DB_PASSWORD = $env:POSTGRES_PASSWORD
 python seed_embeddings.py
 ```
 
-Connect Query Bench to `localhost:5433` / `querybench_demo` / `querybench`.
+Connect Query Bench to `localhost:5433`, database `querybench_demo`, and user
+`querybench`.
 
-**Option B — No Docker (hosted or local PostgreSQL):** run the single combined
-script [`demo/setup_hosted.sql`](demo/setup_hosted.sql) on any PostgreSQL that
-has **PostGIS** and **pgvector** available:
+### Hosted PostgreSQL or Supabase
 
-- **Hosted (fastest):** create a free **Supabase** project (PostGIS + pgvector
-  preinstalled) or an **Azure Database for PostgreSQL Flexible Server** (enable
-  `POSTGIS` and `VECTOR` in the `azure.extensions` allow-list), then paste/run
-  the script in its SQL editor:
-  ```bash
-  psql "<connection-string>" -f demo/setup_hosted.sql
-  ```
-- **Local PostgreSQL:** install PostGIS (via StackBuilder) and pgvector, then
-  run the same script.
-
-Then populate embeddings (set `DEMO_DB_HOST/PORT/NAME/USER/PASSWORD` to your DB):
+Run [`demo/setup_hosted.sql`](demo/setup_hosted.sql) in the database's SQL
+editor or with `psql`:
 
 ```bash
-python demo/seed_embeddings.py
+psql "<connection-string>" -f demo/setup_hosted.sql
 ```
 
-> **No PostGIS/pgvector available?** The app still works — `detect_extensions`
-> reports them absent and the agent falls back to standard ANSI SQL. The map
-> view also renders plain `latitude`/`longitude` columns, so spatial results
-> still plot even without PostGIS.
+If PostGIS or pgvector is unavailable, Query Bench continues to support normal
+relational queries.
 
-Once connected, try these demos:
+## Optional MCP exposure
 
-- *"What is our net revenue from active customers?"* → uses definitions from
-  your uploaded database context, then verifies them against the live schema.
-- *"Which stores are within 5 km of downtown?"* → uses uploaded spatial
-  conventions and emits correct
-  `ST_DWithin(geom::geography, …)` PostGIS SQL.
-- *"Find products similar to 'warm clothing for winter'"* → uses
-  `semantic_data_search` over the pgvector `embedding` column.
+The function registry can also be used by external MCP clients.
 
----
-
-## Features
-
-- Natural-language → SQL via an OpenAI Codex **agent loop** over MCP tools
-- **Database context files** — local schema notes, rules, definitions, and example SQL
-- **Extension-aware** — detects PostGIS / pgvector and adapts the SQL it writes
-- **PostGIS spatial** queries (distance / "near" / containment)
-- **pgvector semantic search** over embedding columns (`semantic_data_search`)
-- Works with **any** connected database through live schema introspection
-- Optional FAISS semantic search over schema (drop in `data/schema_hints.json`)
-- **Schema Explorer** — browse tables, columns, keys, and relationships
-- **Dashboard** — query/execution logs, token usage, and cost analytics
-- **Data Analytics** — visualizations and column statistics
-- SELECT-only execution with SQL validation and safety checks
-- MCP server exposed over **stdio** and optional **HTTP** for IDE clients
-- Multi-database support: PostgreSQL, MySQL, SQL Server, Oracle
-
----
-
-## Project Structure
-
-```
-sql-query-assistant/
-├── server/                     # Python FastAPI backend
-│   ├── main.py                 # Application entry point
-│   ├── mcp_stdio_server.py     # MCP server for IDE integration (stdio)
-│   ├── requirements.txt        # Python dependencies
-│   ├── app/
-│   │   ├── config/             # Settings and rate limits
-│   │   ├── exceptions/         # Error handling
-│   │   ├── middleware/         # Auth + security headers
-│   │   ├── models/             # Request/response Pydantic schemas
-│   │   ├── routes/             # API endpoints (database, copilot, mcp, monitoring)
-│   │   ├── services/           # Core logic (database, Codex agent, context files, logging)
-│   │   └── mcp_server/         # MCP server and SQL tools
-│   └── data/                   # Runtime stores and uploaded database context
-├── demo/                       # Demo DB: PostGIS + pgvector (docker compose + seed)
-├── ui/                         # Angular 17 frontend
-│   └── src/app/
-│       ├── components/
-│       │   ├── mcp-agent/          # Copilot Chat interface
-│       │   ├── connection-dialog/  # Database connection
-│       │   ├── dashboard/          # Logs & cost dashboard
-│       │   ├── data-analytics/     # Data visualization & stats
-│       │   ├── schema-explorer/    # Database schema browser
-│       │   ├── sidebar/            # Navigation
-│       │   └── shared/             # Shared components
-│       ├── models/             # TypeScript interfaces
-│       └── services/           # API, MCP-agent, theme, state services
-└── README.md                   # This file
-```
-
-## Documentation
-
-- **[server/README.md](server/README.md)** — Backend API, endpoints, configuration
-- **[ui/README.md](ui/README.md)** — Frontend setup and components
-
-## MCP Integration
-
-Expose the MCP server to an IDE client over stdio:
+### stdio
 
 ```json
 {
   "servers": {
-    "sql-query-assistant": {
+    "query-bench": {
       "command": "python",
       "args": ["server/mcp_stdio_server.py"],
       "type": "stdio"
@@ -288,14 +258,39 @@ Expose the MCP server to an IDE client over stdio:
 }
 ```
 
-Or enable HTTP transport with `MCP_HTTP_ENABLED=true` in `server/.env` and
-connect to `http://localhost:2222/mcp`.
+### Streamable HTTP
 
----
+Set `MCP_HTTP_ENABLED=true` in `server/.env`, configure its authentication, and
+connect an MCP client to `http://localhost:2222/mcp`.
 
-## Tech Stack
+## Project structure
 
-- **Backend**: FastAPI, SQLAlchemy, MCP Python SDK, (optional) FAISS + sentence-transformers
-- **Frontend**: Angular 17, Angular Material, Tailwind CSS
-- **AI**: OpenAI Codex models through account OAuth (agent LLM; no API key required)
-- **Databases**: PostgreSQL (incl. PostGIS + pgvector), MySQL, SQL Server, Oracle
+```text
+query-bench/
+|-- server/                  FastAPI backend
+|   |-- main.py              Application entry point
+|   |-- mcp_stdio_server.py  Optional MCP stdio entry point
+|   |-- app/
+|       |-- routes/          REST and SSE endpoints
+|       |-- services/        Codex, database, context, and logging services
+|       |-- mcp_server/      Function registry and SQL tools
+|-- ui/                      Angular 17 frontend
+|-- demo/                    Demo database schema and seed scripts
+|-- assets/                  README and submission assets
+|-- README.md
+```
+
+## Technology
+
+- **AI:** OpenAI Codex models through OpenAI OAuth and function calling
+- **Frontend:** Angular 17, Angular Material, Tailwind CSS, RxJS
+- **Backend:** Python, FastAPI, HTTPX, Pydantic
+- **Database:** SQLAlchemy and database-specific drivers
+- **Streaming:** Server-Sent Events
+- **Optional interoperability:** MCP Python SDK
+- **Security:** Windows DPAPI or AES-GCM through `cryptography`
+
+## Documentation
+
+- [Backend documentation](server/README.md)
+- [Frontend documentation](ui/README.md)
