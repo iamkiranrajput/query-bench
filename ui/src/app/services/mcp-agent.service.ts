@@ -2,7 +2,7 @@
  * MCP Agent Service — chat-based agent with tool call visualization
  */
 
-import { Injectable } from '@angular/core';
+import { Injectable, NgZone } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { BehaviorSubject, Observable, catchError, tap, throwError } from 'rxjs';
 import { environment } from '../../environments/environment';
@@ -17,7 +17,6 @@ import {
   McpChatSession,
   TokenUsage,
   CopilotModelInfo,
-  CopilotConfigRequest,
   CopilotConfigResponse,
   CopilotChatRequest,
   CopilotChatResponse,
@@ -111,17 +110,10 @@ export class McpAgentService {
   });
   totalTokenUsage$ = this._totalTokenUsage$.asObservable();
 
-  /** Authenticated GitHub username (for copilot log grouping) */
-  private _githubUsername = '';
-  private _githubUser$ = new BehaviorSubject<{ username: string; name: string; avatar_url: string } | null>(null);
-  githubUser$ = this._githubUser$.asObservable();
-
-  get githubUsername(): string { return this._githubUsername; }
-
   private static readonly SESSIONS_KEY = 'mcp_agent_sessions';
   private static readonly MAX_SESSIONS = 50;
 
-  constructor(private http: HttpClient) {
+  constructor(private http: HttpClient, private ngZone: NgZone) {
     this._loadSessionsFromStorage();
   }
 
@@ -400,22 +392,7 @@ export class McpAgentService {
     return this._messages$.value;
   }
 
-  // ── Copilot / GitHub Models ─────────────────────────────────────
-
-  configureCopilot(token: string, defaultModel: string): Observable<CopilotConfigResponse> {
-    return this.http
-      .post<CopilotConfigResponse>(`${this.apiUrl}/api/copilot/configure`, {
-        github_token: token,
-        default_model: defaultModel,
-      } as CopilotConfigRequest)
-      .pipe(
-        tap((cfg) => {
-          this._copilotConfig$.next(cfg);
-          this.fetchGithubUser();
-        }),
-        catchError(this._handleError)
-      );
-  }
+  // ── OpenAI Codex models and OAuth configuration ─────────────────
 
   loadCopilotConfig(): Observable<CopilotConfigResponse> {
     return this.http
@@ -423,9 +400,6 @@ export class McpAgentService {
       .pipe(
         tap((cfg) => {
           this._copilotConfig$.next(cfg);
-          if (cfg.configured) {
-            this.fetchGithubUser();
-          }
         }),
         catchError(this._handleError)
       );
@@ -519,8 +493,6 @@ export class McpAgentService {
       );
   }
 
-  // ── GitHub OAuth Device Flow ──────────────────────────────────────
-
   /**
    * Streaming version of sendCopilotMessage.
    * Uses SSE to progressively show tool steps as the agent works.
@@ -574,17 +546,36 @@ export class McpAgentService {
     })
       .then(async (response) => {
         if (!response.ok || !response.body) {
-          this._updateMessage(assistantMsgId, {
-            error: `HTTP ${response.status}: ${response.statusText}`,
-            content: `Error: HTTP ${response.status}`,
+          this._runInAngularZone(() => {
+            this._updateMessage(assistantMsgId, {
+              error: `HTTP ${response.status}: ${response.statusText}`,
+              content: `Error: HTTP ${response.status}`,
+            });
+            this._loading$.next(false);
           });
-          this._loading$.next(false);
           return;
         }
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let eventType = '';
+        const eventDataLines: string[] = [];
+
+        const flushEvent = () => {
+          if (!eventType || eventDataLines.length === 0) return;
+          const eventData = eventDataLines.join('\n');
+          try {
+            const data = JSON.parse(eventData);
+            this._runInAngularZone(() => {
+              this._handleSSEEvent(assistantMsgId, eventType, data);
+            });
+          } catch (e) {
+            console.error('SSE parse error:', e, { eventType, eventData });
+          }
+          eventType = '';
+          eventDataLines.length = 0;
+        };
 
         while (true) {
           const { done, value } = await reader.read();
@@ -594,36 +585,42 @@ export class McpAgentService {
           const lines = buffer.split('\n');
           buffer = lines.pop() || ''; // Keep incomplete line in buffer
 
-          let eventType = '';
-          let eventData = '';
-
           for (const line of lines) {
-            if (line.startsWith('event: ')) {
-              eventType = line.slice(7).trim();
-            } else if (line.startsWith('data: ')) {
-              eventData = line.slice(6);
-            } else if (line === '' && eventType && eventData) {
+            const normalized = line.endsWith('\r') ? line.slice(0, -1) : line;
+            if (normalized.startsWith('event:')) {
+              flushEvent();
+              eventType = normalized.slice(6).trim();
+            } else if (normalized.startsWith('data:')) {
+              eventDataLines.push(normalized.slice(5).trimStart());
+            } else if (normalized === '') {
               // Complete event — process it
-              try {
-                const data = JSON.parse(eventData);
-                this._handleSSEEvent(assistantMsgId, eventType, data);
-              } catch (e) {
-                console.error('SSE parse error:', e);
-              }
-              eventType = '';
-              eventData = '';
+              flushEvent();
             }
           }
         }
 
-        this._loading$.next(false);
+        buffer += decoder.decode();
+        if (buffer) {
+          const normalized = buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer;
+          if (normalized.startsWith('event:')) {
+            flushEvent();
+            eventType = normalized.slice(6).trim();
+          } else if (normalized.startsWith('data:')) {
+            eventDataLines.push(normalized.slice(5).trimStart());
+          }
+        }
+        flushEvent();
+        this._runInAngularZone(() => this._loading$.next(false));
       })
       .catch((err) => {
-        this._updateMessage(assistantMsgId, {
-          error: err?.message || 'Stream connection failed',
-          content: `Error: ${err?.message || 'Connection failed'}`,
+        const streamError = this._formatStreamConnectionError(err);
+        this._runInAngularZone(() => {
+          this._updateMessage(assistantMsgId, {
+            error: streamError,
+            content: `Error: ${streamError}`,
+          });
+          this._loading$.next(false);
         });
-        this._loading$.next(false);
       });
 
     return assistantMsgId;
@@ -681,6 +678,7 @@ export class McpAgentService {
             ...updatedSteps[idx],
             success: data.success,
             error: data.error,
+            result: data.result !== undefined ? data.result : updatedSteps[idx].result,
             execution_time_ms: data.execution_time_ms,
             database: data.database || updatedSteps[idx].database,
           };
@@ -692,6 +690,7 @@ export class McpAgentService {
       }
 
       case 'done': {
+        this._loading$.next(false);
         if (data.session_id) {
           this._copilotSessionId = data.session_id;
         }
@@ -748,6 +747,18 @@ export class McpAgentService {
     }
   }
 
+  private _runInAngularZone<T>(fn: () => T): T {
+    return NgZone.isInAngularZone() ? fn() : this.ngZone.run(fn);
+  }
+
+  private _formatStreamConnectionError(err: any): string {
+    const raw = String(err?.message || err || '').trim();
+    if (!raw || /failed to fetch|network|load failed|connection/i.test(raw)) {
+      return `Backend connection failed. Make sure FastAPI is running at ${this.apiUrl}, then retry.`;
+    }
+    return raw;
+  }
+
   /** Update specific fields on an existing message */
   private _updateMessage(msgId: string, updates: Partial<McpChatMessage>): void {
     const messages = this._messages$.getValue();
@@ -758,7 +769,7 @@ export class McpAgentService {
     this._messages$.next(updated);
   }
 
-  // ── GitHub OAuth Device Flow (original) ──────────────────────────
+  // ── OpenAI Codex OAuth device flow ───────────────────────────────
 
   startDeviceFlow(): Observable<DeviceFlowResponse> {
     return this.http
@@ -772,37 +783,17 @@ export class McpAgentService {
       .pipe(
         tap((res: any) => {
           if (res.status === 'complete') {
-            this.fetchGithubUser();
+            this._copilotConfig$.next(res as CopilotConfigResponse);
           }
         }),
         catchError(this._handleError),
       );
   }
 
-  /** Fetch the authenticated GitHub user and cache the username. */
-  fetchGithubUser(): void {
-    this.http.get<{ username: string; name: string; avatar_url: string }>(`${this.apiUrl}/api/copilot/auth/user`)
-      .subscribe({
-        next: (user) => {
-          this._githubUsername = user.username;
-          this._githubUser$.next(user);
-        },
-        error: () => { /* silently ignore — user stays 'unknown' */ },
-      });
-  }
-
-  /** Disconnect from GitHub OAuth — clears tokens on backend and resets local state. */
-  disconnectGithub(): Observable<any> {
+  disconnectOpenAI(): Observable<CopilotConfigResponse> {
     return this.http
-      .post(`${this.apiUrl}/api/copilot/auth/disconnect`, {})
-      .pipe(
-        tap(() => {
-          this._githubUsername = '';
-          this._githubUser$.next(null);
-          this._copilotConfig$.next({ configured: false, default_model: '', has_token: false });
-        }),
-        catchError(this._handleError),
-      );
+      .post<CopilotConfigResponse>(`${this.apiUrl}/api/copilot/auth/disconnect`, {})
+      .pipe(tap((cfg) => this._copilotConfig$.next(cfg)), catchError(this._handleError));
   }
 
   // ── Cross-Database ──────────────────────────────────────────────
@@ -841,7 +832,6 @@ export class McpAgentService {
       model: msg.tokenUsage?.model || '',
       tables_used: Array.from(tablesUsed).filter(Boolean),
       db_identity: msg.activeDatabase || '',
-      github_username: this._githubUsername || '',
       error_message: msg.error || null,
       tool_steps: (msg.toolSteps || []).map(ts => ({
         tool_name: ts.tool_name,
@@ -896,20 +886,6 @@ export class McpAgentService {
       'o3-mini':              [1.10,  4.40],
       'o1-mini':              [3.00,  12.00],
       'o1':                   [15.00, 60.00],
-      // Google Gemini
-      'gemini-2.5-flash':     [0.30,  2.50],
-      'gemini-2.5-pro':       [1.25,  10.00],
-      'gemini-3.1-flash-lite': [0.25,  1.50],
-      // Anthropic Claude 4.x
-      'claude-opus-4.7':      [5.00,  25.00],
-      'claude-opus-4-7':      [5.00,  25.00],
-      'claude-opus-4':        [15.00, 75.00],
-      'claude-sonnet-4':      [3.00,  15.00],
-      'claude-haiku-4':       [1.00,  5.00],
-      // Anthropic Claude 3.x
-      'claude-3-opus':        [15.00, 75.00],
-      'claude-3-sonnet':      [3.00,  15.00],
-      'claude-3-haiku':       [0.25,  1.25],
     };
     const m = (model || '').toLowerCase();
     let rates: [number, number] = [0.15, 0.60]; // default: gpt-4o-mini

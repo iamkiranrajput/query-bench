@@ -21,7 +21,7 @@ logger = setup_logger(__name__)
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "query_logs.db")
 
-# Phase 3 â€” strip single-quoted literals from stored SQL/user_query when
+# Phase 3 - strip single-quoted literals from stored SQL/user_query when
 # `QUERY_LOG_REDACT_LITERALS=true`. Escaped-single-quote pairs (`''`) inside
 # a literal are accepted. Sole purpose: keep sensitive literals (emails, IDs,
 # IP addresses) out of the audit DB while still letting operators see query shape.
@@ -42,9 +42,9 @@ def _maybe_redact_literals(text: Optional[str]) -> Optional[str]:
 
 @dataclass
 class CopilotLogEntry:
-    """Single copilot/MCP Agent query log entry â€” keyed by github_username."""
+    """Single OpenAI Codex agent query log entry keyed by actor_identity."""
     timestamp: str
-    github_username: str
+    actor_identity: str
     session_id: str
     user_query: str
     generated_sql: str
@@ -75,7 +75,7 @@ class QueryLogService:
         self._db_path = os.path.abspath(DB_PATH)
         self._init_db()
         self._load_copilot_from_db()
-        # Phase 3 â€” prune once at startup, then on a background timer.
+        # Phase 3 - prune once at startup, then on a background timer.
         self._retention_stop = threading.Event()
         self._retention_thread: Optional[threading.Thread] = None
         try:
@@ -111,7 +111,7 @@ class QueryLogService:
                     )
                     total_deleted += cursor.rowcount or 0
                 except sqlite3.OperationalError:
-                    # Table doesn't exist yet â€” ignore.
+                    # Table doesn't exist yet; ignore.
                     pass
             conn.commit()
             conn.close()
@@ -150,12 +150,12 @@ class QueryLogService:
             conn = sqlite3.connect(self._db_path)
             cursor = conn.cursor()
             
-            # MCP Agent (GitHub Copilot) logs table, keyed by github_username
+            # MCP Agent (OpenAI Codex) logs table, keyed by actor_identity
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS copilot_query_logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL,
-                    github_username TEXT NOT NULL,
+                    actor_identity TEXT NOT NULL,
                     session_id TEXT NOT NULL,
                     user_query TEXT NOT NULL,
                     generated_sql TEXT,
@@ -169,7 +169,21 @@ class QueryLogService:
                     token_usage TEXT
                 )
             """)
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_copilot_username ON copilot_query_logs(github_username)")
+            # One-time compatibility migration for databases created by the
+            # former GitHub-authenticated implementation.
+            columns = {row[1] for row in cursor.execute("PRAGMA table_info(copilot_query_logs)")}
+            legacy_identity_column = "github" + "_username"
+            if "actor_identity" not in columns:
+                cursor.execute(
+                    "ALTER TABLE copilot_query_logs "
+                    "ADD COLUMN actor_identity TEXT NOT NULL DEFAULT 'unknown'"
+                )
+                if legacy_identity_column in columns:
+                    cursor.execute(
+                        f"UPDATE copilot_query_logs SET actor_identity = {legacy_identity_column} "
+                        "WHERE actor_identity = 'unknown'"
+                    )
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_copilot_actor ON copilot_query_logs(actor_identity)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_copilot_timestamp ON copilot_query_logs(timestamp)")
 
             conn.commit()
@@ -193,7 +207,7 @@ class QueryLogService:
         # Pricing per 1M tokens: [input, output]
         # ORDER MATTERS: more-specific keys must appear before shorter prefixes
         pricing = {
-            # OpenAI â€“ specific first
+            # OpenAI - specific first
             "gpt-5.5":              [5.00,  30.00],
             "gpt-5.4-mini":         [0.75,  4.50],
             "gpt-5.4-nano":         [0.20,  1.25],
@@ -211,20 +225,6 @@ class QueryLogService:
             "o3-mini":              [1.10,  4.40],
             "o1-mini":              [3.00,  12.00],
             "o1":                   [15.00, 60.00],
-            # Google Gemini
-            "gemini-2.5-flash":     [0.30,  2.50],
-            "gemini-2.5-pro":       [1.25,  10.00],
-            "gemini-3.1-flash-lite":[0.25,  1.50],
-            # Anthropic Claude 4.x â€“ version-specific first
-            "claude-opus-4.7":      [5.00,  25.00],
-            "claude-opus-4-7":      [5.00,  25.00],
-            "claude-opus-4":        [15.00, 75.00],   # 4.5, 4.6
-            "claude-sonnet-4":      [3.00,  15.00],
-            "claude-haiku-4":       [1.00,  5.00],
-            # Anthropic Claude 3.x legacy
-            "claude-3-opus":        [15.00, 75.00],
-            "claude-3-sonnet":      [3.00,  15.00],
-            "claude-3-haiku":       [0.25,  1.25],
         }
         model = (token_usage.get("model") or "").lower()
         rates = pricing.get("gpt-4o-mini")  # default
@@ -278,12 +278,11 @@ class QueryLogService:
             logger.error(f"Failed to recalculate costs: {e}")
             raise
         return {"updated": updated}
-
-    # â”€â”€ Copilot / MCP Agent Log Methods â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # -- OpenAI Codex Agent Log Methods -----------------------------
 
     def log_copilot_query(
         self,
-        github_username: str,
+        actor_identity: str,
         session_id: str,
         user_query: str,
         generated_sql: str,
@@ -296,10 +295,10 @@ class QueryLogService:
         error_message: Optional[str] = None,
         token_usage: Dict[str, Any] = None,
     ) -> None:
-        """Log a copilot/MCP Agent query (keyed by github_username)."""
+        """Log an OpenAI Codex agent query (keyed by actor_identity)."""
         entry = CopilotLogEntry(
             timestamp=datetime.now(timezone.utc).isoformat(),
-            github_username=github_username or "unknown",
+            actor_identity=actor_identity or "unknown",
             session_id=session_id,
             user_query=user_query,
             generated_sql=generated_sql,
@@ -312,11 +311,11 @@ class QueryLogService:
             error_message=error_message,
             token_usage=token_usage or {},
         )
-        status = "âœ”" if entry.success else "âœ˜"
+        status = "success" if entry.success else "failure"
         logger.info(
-            f"[COPILOT_LOG] {status} @{github_username} â”‚ "
-            f"rows={entry.row_count} â”‚ {entry.total_time_ms:.0f}ms â”‚ "
-            f"model={model} â”‚ \"{entry.user_query[:80]}\""
+            f"[CODEX_LOG] {status} @{actor_identity} | "
+            f"rows={entry.row_count} | {entry.total_time_ms:.0f}ms | "
+            f"model={model} | \"{entry.user_query[:80]}\""
         )
         with self._lock:
             self._copilot_entries.append(entry)
@@ -331,13 +330,13 @@ class QueryLogService:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO copilot_query_logs
-                (timestamp, github_username, session_id, user_query, generated_sql,
+                (timestamp, actor_identity, session_id, user_query, generated_sql,
                  total_time_ms, phase_timings, success, row_count, model,
                  tables_used, error_message, token_usage)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry.timestamp,
-                entry.github_username,
+                entry.actor_identity,
                 entry.session_id,
                 _maybe_redact_literals(entry.user_query),
                 _maybe_redact_literals(entry.generated_sql),
@@ -361,7 +360,7 @@ class QueryLogService:
             conn = sqlite3.connect(self._db_path)
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT timestamp, github_username, session_id, user_query, generated_sql,
+                SELECT timestamp, actor_identity, session_id, user_query, generated_sql,
                        total_time_ms, phase_timings, success, row_count, model,
                        tables_used, error_message, token_usage
                 FROM copilot_query_logs
@@ -374,7 +373,7 @@ class QueryLogService:
             for row in reversed(rows):
                 entry = CopilotLogEntry(
                     timestamp=row[0],
-                    github_username=row[1] or "",
+                    actor_identity=row[1] or "",
                     session_id=row[2] or "",
                     user_query=row[3] or "",
                     generated_sql=row[4] or "",
@@ -399,14 +398,14 @@ class QueryLogService:
     def get_copilot_logs(
         self,
         limit: int = 100,
-        github_username: Optional[str] = None,
+        actor_identity: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get copilot/MCP Agent query logs, optionally filtered by github_username."""
+        """Get OpenAI Codex agent query logs, optionally filtered by actor_identity."""
         with self._lock:
             entries = list(self._copilot_entries)
 
-        if github_username:
-            entries = [e for e in entries if e.github_username == github_username]
+        if actor_identity:
+            entries = [e for e in entries if e.actor_identity == actor_identity]
 
         entries = entries[-limit:]
         entries.reverse()
@@ -419,7 +418,7 @@ class QueryLogService:
         return [
             {
                 "timestamp": e.timestamp,
-                "github_username": e.github_username,
+                "actor_identity": e.actor_identity,
                 "session_id": e.session_id,
                 "user_query": e.user_query,
                 "generated_sql": e.generated_sql[:500] if e.generated_sql else "",
@@ -449,12 +448,12 @@ class QueryLogService:
             for e in entries
         ]
 
-    def get_copilot_stats(self, github_username: Optional[str] = None) -> Dict[str, Any]:
+    def get_copilot_stats(self, actor_identity: Optional[str] = None) -> Dict[str, Any]:
         """Get aggregate stats for copilot logs."""
         with self._lock:
             entries = list(self._copilot_entries)
-        if github_username:
-            entries = [e for e in entries if e.github_username == github_username]
+        if actor_identity:
+            entries = [e for e in entries if e.actor_identity == actor_identity]
         if not entries:
             return {"total_queries": 0, "success_rate": 0.0, "avg_time_ms": 0.0, "total_tokens": 0, "total_cost": 0.0}
         successful = sum(1 for e in entries if e.success)

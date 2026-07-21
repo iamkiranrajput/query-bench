@@ -200,7 +200,7 @@
   <div *ngIf="!loading && !error && logs.length === 0" class="empty-state">
     <mat-icon>insights</mat-icon>
     <h2>No Data Yet</h2>
-    <p>Start using Copilot Chat to see analytics here. Query performance, table usage and trends will appear as you interact with your data.</p>
+    <p>Start using OpenAI Codex to see analytics here. Query performance, table usage and trends will appear as you interact with your data.</p>
   </div>
 
   <!-- Detail Modal -->
@@ -247,10 +247,6 @@
 
         <!-- Meta Grid -->
         <div class="detail-grid">
-          <div class="detail-cell">
-            <label>User</label>
-            <span>{{ selectedLog.github_username || '—' }}</span>
-          </div>
           <div class="detail-cell">
             <label>Tables Used</label>
             <span>{{ selectedLog.tables_used.length ? selectedLog.tables_used.join(', ') : '—' }}</span>

@@ -3,7 +3,7 @@
  *
  * Chat interface where the user types natural language questions,
  * the LLM agent orchestrates MCP tool calls, and the full tool-call
- * trace is shown inline (like GitHub Copilot Chat).
+ * trace is shown inline.
  */
 
 import {
@@ -37,9 +37,6 @@ import {
   McpChatSession,
   McpAgentToolStep,
   CopilotModelInfo,
-  TrustCheck,
-  TrustVerification,
-  GroundedSource,
 } from '../../models/mcp-agent.models';
 
 @Component({
@@ -93,23 +90,22 @@ export class McpAgentComponent implements OnInit, OnDestroy {
   totalCost = 0;
 
   // ── Copilot Mode ────────────────────────────────────────────────
-  /** GitHub Copilot Chat is the only mode. */
+  /** OpenAI Codex chat is the only mode. */
   activeMode: 'copilot' = 'copilot';
 
   /** Copilot models */
   copilotModels: CopilotModelInfo[] = [];
-  selectedModel = 'claude-opus-4';
+  selectedModel = 'gpt-5.6-sol';
   copilotConfigured = false;
-  githubUser: { username: string; name: string; avatar_url: string } | null = null;
+  hasOpenAIToken = false;
+  codexEmail = '';
+  codexDisplayName = '';
 
   /** Grouped models by vendor (collapsed sections) */
   groupedModels: { vendor: string; models: CopilotModelInfo[]; expanded: boolean }[] = [];
 
   /** Config dialog state */
   showConfigDialog = false;
-  configToken = '';
-  configModel = 'claude-sonnet-4';
-  configSaving = false;
 
   /** OAuth Device Flow state */
   deviceFlowActive = false;
@@ -158,14 +154,17 @@ export class McpAgentComponent implements OnInit, OnDestroy {
       this.cdr.markForCheck();
     });
 
-    // Load Copilot config + models
+    // Load OpenAI Codex config + models
     this.mcpAgent.loadCopilotConfig().subscribe({
       next: (cfg) => {
-        this.copilotConfigured = cfg.configured;
-        // Only override if the saved default is a Claude model; ignore stale gpt-4o defaults
-        if (cfg.default_model && cfg.default_model.startsWith('claude')) {
+        this.copilotConfigured = cfg.has_codex_token;
+        this.hasOpenAIToken = cfg.has_codex_token;
+        this.codexEmail = cfg.codex_email || '';
+        this.codexDisplayName = cfg.codex_display_name || '';
+        if (cfg.default_model) {
           this.selectedModel = cfg.default_model;
         }
+        this.reloadModels();
         this.cdr.markForCheck();
       },
     });
@@ -173,24 +172,15 @@ export class McpAgentComponent implements OnInit, OnDestroy {
     this.mcpAgent.loadCopilotModels().subscribe({
       next: (models) => {
         this.copilotModels = models;
-        // If current selection isn't in the model list, pick best Claude Opus match
-        if (models.length && !models.some(m => m.id === this.selectedModel)) {
-          const claudeOpus = models.find(m => m.id.startsWith('claude-opus-4'));
-          const fallback = claudeOpus || models.find(m => m.id.startsWith('claude-sonnet-4'));
-          if (fallback) {
-            this.selectedModel = fallback.id;
-          }
+        // Use the first chat-capable model if the saved selection is unavailable.
+        if (!models.some(m => m.id === this.selectedModel && m.supported_in_api !== false)) {
+          this.selectedModel = models.find(m => m.supported_in_api !== false)?.id || this.selectedModel;
         }
         this._buildGroupedModels();
         this.cdr.markForCheck();
       },
     });
 
-    // Subscribe to GitHub user profile
-    this.mcpAgent.githubUser$.pipe(takeUntil(this.destroy$)).subscribe((user) => {
-      this.githubUser = user;
-      this.cdr.markForCheck();
-    });
 
     // Register saved connections for cross-database support
     this._registerSavedConnections();
@@ -232,7 +222,7 @@ export class McpAgentComponent implements OnInit, OnDestroy {
     }
 
     if (!this.copilotConfigured) {
-      this.snackBar.open('Configure your GitHub token first (click ⚙ icon)', 'OK', { duration: 4000 });
+      this.snackBar.open('Sign in with OpenAI Codex first (click the settings icon)', 'OK', { duration: 4000 });
       return;
     }
     // Copilot works independently — it can auto-connect via switch_database.
@@ -261,7 +251,7 @@ export class McpAgentComponent implements OnInit, OnDestroy {
   private _buildGroupedModels(): void {
     const map = new Map<string, CopilotModelInfo[]>();
     // Preferred vendor order
-    const vendorOrder = ['Anthropic', 'OpenAI', 'Google', 'Meta', 'Microsoft', 'Mistral'];
+    const vendorOrder = ['OpenAI'];
     for (const m of this.copilotModels) {
       const vendor = m.vendor || 'Other';
       if (!map.has(vendor)) map.set(vendor, []);
@@ -608,11 +598,6 @@ export class McpAgentComponent implements OnInit, OnDestroy {
     if (!step.success) return step.error || 'Failed';
     const r = step.result;
     if (!r) return 'OK';
-    if (step.tool_name === 'retrieve_business_context') {
-      if (r.configured === false) return 'Foundry IQ not configured';
-      const n = (r.citations && r.citations.length) || 0;
-      return n ? `${n} governed source${n !== 1 ? 's' : ''}` : 'Grounded';
-    }
     if (r.extensions) return `${r.extensions.length} extension${r.extensions.length !== 1 ? 's' : ''}`;
     if (r.rows) return `${r.row_count ?? r.rows.length} row${(r.row_count ?? r.rows.length) !== 1 ? 's' : ''}`;
     if (r.tables) return `${r.tables.length} table${r.tables.length !== 1 ? 's' : ''}`;
@@ -653,8 +638,6 @@ export class McpAgentComponent implements OnInit, OnDestroy {
         return 'Analyzing query execution plan';
       case 'fix_sql':
         return 'Fixing SQL query based on error feedback';
-      case 'retrieve_business_context':
-        return `Grounding "${(args['query'] || '...').toString().substring(0, 80)}" in Microsoft Foundry IQ`;
       case 'detect_extensions':
         return 'Detecting database extensions (PostGIS, pgvector, ...)';
       case 'semantic_data_search':
@@ -684,7 +667,6 @@ export class McpAgentComponent implements OnInit, OnDestroy {
       execute_sql: 'play_arrow',
       explain_sql: 'help_outline',
       fix_sql: 'build',
-      retrieve_business_context: 'menu_book',
       detect_extensions: 'extension',
       semantic_data_search: 'travel_explore',
       connect_database: 'power',
@@ -714,73 +696,6 @@ export class McpAgentComponent implements OnInit, OnDestroy {
     return index;
   }
 
-  /** True when the step is a Foundry IQ knowledge-grounding call. */
-  isFoundryGrounding(step: McpAgentToolStep): boolean {
-    return step.tool_name === 'retrieve_business_context';
-  }
-
-  /** True when Foundry IQ actually answered (vs. not-configured). */
-  foundryConfigured(step: McpAgentToolStep): boolean {
-    return !!(step.result && (step.result as any).configured);
-  }
-
-  /** Governed citations returned by a Foundry IQ grounding step. */
-  foundryCitations(
-    step: McpAgentToolStep
-  ): Array<{ title?: string; source?: string; snippet?: string }> {
-    const c = step.result && (step.result as any).citations;
-    return Array.isArray(c) ? c : [];
-  }
-
-  // ── Verifiable Trust Layer (Phase 1) ────────────────────────────
-
-  /** True when the message carries computed trust signals worth showing. */
-  hasTrust(msg: McpChatMessage): boolean {
-    return !!(msg.trustLabel && (msg.trustChecks?.length || msg.verification));
-  }
-
-  /** Normalised trust label ('verified' | 'caution' | 'unverified'). */
-  trustLabel(msg: McpChatMessage): string {
-    return (msg.trustLabel || 'unverified').toLowerCase();
-  }
-
-  /** Material icon for the trust state. */
-  trustIcon(msg: McpChatMessage): string {
-    switch (this.trustLabel(msg)) {
-      case 'verified': return 'verified_user';
-      case 'caution': return 'gpp_maybe';
-      default: return 'gpp_bad';
-    }
-  }
-
-  /** Headline text for the trust panel. */
-  trustHeadline(msg: McpChatMessage): string {
-    const v = msg.verification;
-    if (v && !v.agreed) return 'Verification failed — discrepancy flagged';
-    switch (this.trustLabel(msg)) {
-      case 'verified': return 'Verified';
-      case 'caution': return 'Partially verified';
-      default: return 'Unverified';
-    }
-  }
-
-  trustChecks(msg: McpChatMessage): TrustCheck[] {
-    return msg.trustChecks || [];
-  }
-
-  trustVerification(msg: McpChatMessage): TrustVerification | null {
-    return msg.verification || null;
-  }
-
-  trustGroundedSources(msg: McpChatMessage): GroundedSource[] {
-    return msg.groundedSources || [];
-  }
-
-  /** Count of passed checks, for the "N/M checks" summary. */
-  trustPassedCount(msg: McpChatMessage): number {
-    return this.trustChecks(msg).filter((c) => c.passed).length;
-  }
-
   /** Get the last assistant message (used for inline loading indicator) */
   getLastAssistantMessage(): McpChatMessage | null {
     for (let i = this.messages.length - 1; i >= 0; i--) {
@@ -796,46 +711,34 @@ export class McpAgentComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
+  selectModel(model: CopilotModelInfo): void {
+    if (model.supported_in_api === false) return;
+    this.selectedModel = model.id;
+  }
+
+  reloadModels(): void {
+    this.copilotConfigured = this.hasOpenAIToken;
+    this.mcpAgent.loadCopilotModels().subscribe({
+      next: (models) => {
+        this.copilotModels = models;
+        if (!models.some(model => model.id === this.selectedModel && model.supported_in_api !== false)) {
+          this.selectedModel = models.find(model => model.supported_in_api !== false)?.id || this.selectedModel;
+        }
+        this._buildGroupedModels();
+        this.cdr.markForCheck();
+      },
+      error: () => this.cdr.markForCheck(),
+    });
+  }
+
   closeConfigDialog(): void {
     this.showConfigDialog = false;
     this.cdr.markForCheck();
   }
 
-  saveCopilotConfig(): void {
-    if (!this.configToken.trim()) return;
-    this.configSaving = true;
-    this.mcpAgent
-      .configureCopilot(this.configToken.trim(), this.configModel)
-      .subscribe({
-        next: (cfg) => {
-          this.copilotConfigured = cfg.configured;
-          this.selectedModel = cfg.default_model;
-          this.configSaving = false;
-          this.showConfigDialog = false;
-          this.configToken = ''; // Don't keep token in memory
-          this.snackBar.open('GitHub Copilot connected successfully!', 'OK', { duration: 3000 });
-          // Reload models with the new token
-          this.mcpAgent.loadCopilotModels().subscribe({
-            next: (models) => {
-              this.copilotModels = models;
-              this._buildGroupedModels();
-              this.cdr.markForCheck();
-            },
-          });
-          this.cdr.markForCheck();
-        },
-        error: (err) => {
-          this.configSaving = false;
-          const detail = err?.error?.detail || err?.message || 'Token verification failed';
-          this.snackBar.open(detail, 'Dismiss', { duration: 8000 });
-          this.cdr.markForCheck();
-        },
-      });
-  }
+  // ── OpenAI Codex OAuth Device Flow ──────────────────────────────
 
-  // ── GitHub OAuth Device Flow ────────────────────────────────────
-
-  startGitHubSignIn(): void {
+  startCodexSignIn(): void {
     this.deviceFlowActive = true;
     this.deviceFlowStatus = 'Starting...';
     this.cdr.markForCheck();
@@ -847,7 +750,7 @@ export class McpAgentComponent implements OnInit, OnDestroy {
         this.deviceFlowStatus = '';
         this.cdr.markForCheck();
 
-        // Open GitHub in a new tab
+        // Open the OpenAI Codex device authorization page.
         window.open(res.verification_uri, '_blank');
 
         // Start polling for approval
@@ -871,21 +774,17 @@ export class McpAgentComponent implements OnInit, OnDestroy {
     this.cdr.markForCheck();
   }
 
-  signOutGitHub(): void {
-    this.mcpAgent.disconnectGithub().subscribe({
-      next: () => {
-        this.copilotConfigured = false;
-        this.githubUser = null;
+  signOutOpenAI(): void {
+    this.mcpAgent.disconnectOpenAI().subscribe({
+      next: (cfg) => {
+        this.hasOpenAIToken = false;
+        this.copilotConfigured = cfg.configured;
         this.copilotModels = [];
         this.groupedModels = [];
-        this.snackBar.open('Signed out of GitHub', 'OK', { duration: 3000 });
+        this.snackBar.open('OpenAI credentials removed', 'OK', { duration: 3000 });
         this.cdr.markForCheck();
       },
-      error: (err) => {
-        const detail = err?.error?.detail || err?.message || 'Sign out failed';
-        this.snackBar.open(detail, 'Dismiss', { duration: 5000 });
-        this.cdr.markForCheck();
-      },
+      error: (err) => this.snackBar.open(err?.message || 'Sign out failed', 'Dismiss', { duration: 5000 }),
     });
   }
 
@@ -911,7 +810,7 @@ export class McpAgentComponent implements OnInit, OnDestroy {
       if (!this.deviceFlowPolling) return;
       this.mcpAgent.pollDeviceFlow().subscribe({
         next: (res) => {
-          // If GitHub says slow_down, use its interval
+          // Honor a server-requested slower polling interval.
           if (res.interval && res.interval > this._deviceFlowIntervalSec) {
             this._deviceFlowIntervalSec = res.interval;
           }
@@ -919,11 +818,12 @@ export class McpAgentComponent implements OnInit, OnDestroy {
             this._stopDeviceFlowPolling();
             this.deviceFlowActive = false;
             this.copilotConfigured = true;
-            if (res.default_model && res.default_model.startsWith('claude')) {
+            if (res.default_model) {
               this.selectedModel = res.default_model;
             }
             this.showConfigDialog = false;
-            this.snackBar.open('GitHub Copilot connected!', 'OK', { duration: 3000 });
+            this.hasOpenAIToken = true;
+            this.snackBar.open('OpenAI Codex connected!', 'OK', { duration: 3000 });
 
             // Reload models
             this.mcpAgent.loadCopilotModels().subscribe({

@@ -1,10 +1,4 @@
-"""
-GitHub Copilot API Routes
-
-Uses the same auth flow as VS Code Copilot:
-GitHub PAT → token exchange at api.github.com/copilot_internal/v2/token →
-short-lived Copilot session token → api.githubcopilot.com/chat/completions
-"""
+"""OpenAI Codex OAuth and SQL-agent API routes."""
 
 import logging
 import time
@@ -25,15 +19,15 @@ router = APIRouter(prefix="/copilot")
 
 # ── Pydantic Models ───────────────────────────────────────────────
 
-class CopilotConfigRequest(BaseModel):
-    github_token: str = Field(..., description="GitHub Personal Access Token")
-    default_model: str = Field("claude-opus-4", description="Default model ID")
-
-
 class CopilotConfigResponse(BaseModel):
+    provider: str = "openai_codex"
     configured: bool
     default_model: str
     has_token: bool
+    has_codex_token: bool = False
+    codex_email: str = ""
+    codex_display_name: str = ""
+    codex_account_id: str = ""
 
 
 class CopilotModelInfo(BaseModel):
@@ -41,6 +35,8 @@ class CopilotModelInfo(BaseModel):
     name: str
     vendor: str = "Unknown"
     context_window: int = 0
+    supported_in_api: bool = True
+    visibility: str = "list"
 
 
 class CopilotChatRequest(BaseModel):
@@ -85,28 +81,6 @@ class CopilotChatResponse(BaseModel):
 
 # ── Routes ────────────────────────────────────────────────────────
 
-@router.post("/configure", response_model=CopilotConfigResponse)
-async def configure_copilot(request: CopilotConfigRequest):
-    """
-    Configure the GitHub PAT for Copilot.
-    Verifies the token by exchanging it for a Copilot session token first.
-    """
-    svc = get_copilot_service()
-    # Store the token
-    svc.configure(github_token=request.github_token, default_model=request.default_model)
-    # Verify it by attempting the token exchange
-    try:
-        await svc._get_copilot_token()
-        logger.info("Copilot token verified successfully via token exchange")
-    except Exception as e:
-        # Reset on failure
-        svc._github_token = None
-        svc._copilot_token = None
-        raise HTTPException(status_code=401, detail=str(e))
-    cfg = svc.get_config()
-    return CopilotConfigResponse(**cfg)
-
-
 @router.get("/config", response_model=CopilotConfigResponse)
 async def get_copilot_config():
     """Get current Copilot configuration status."""
@@ -117,7 +91,7 @@ async def get_copilot_config():
 
 @router.get("/models", response_model=List[CopilotModelInfo])
 async def list_copilot_models():
-    """List available models from GitHub Models API."""
+    """List models exposed by the signed-in Codex account."""
     svc = get_copilot_service()
     models = await svc.list_models()
     return [CopilotModelInfo(**m) for m in models]
@@ -126,7 +100,7 @@ async def list_copilot_models():
 @router.post("/chat", response_model=CopilotChatResponse)
 async def copilot_chat(request: CopilotChatRequest):
     """
-    Chat with a GitHub Copilot model using MCP tools.
+    Chat with an OpenAI Codex model using MCP tools.
 
     The model receives the user's question along with MCP tool definitions.
     It can call tools (search_tables, generate_sql, execute_sql, etc.)
@@ -137,7 +111,7 @@ async def copilot_chat(request: CopilotChatRequest):
     if not svc.is_configured:
         return CopilotChatResponse(
             success=False,
-            error="GitHub token not configured. Go to MCP Agent tab → click the settings icon → enter your GitHub PAT.",
+            error="OpenAI Codex is not connected. Sign in with OpenAI first.",
         )
 
     session_id = request.session_id or f"copilot-{int(time.time())}"
@@ -212,7 +186,7 @@ async def copilot_chat(request: CopilotChatRequest):
             return f"{ms:.0f}ms"
 
         query_log_service.log_copilot_query(
-            github_username="",
+            actor_identity="openai",
             session_id=session_id,
             user_query=request.message,
             generated_sql=result.sql or "",
@@ -255,8 +229,17 @@ async def copilot_chat_stream(request: CopilotChatRequest):
     if not svc.is_configured:
         async def err_gen():
             import json
-            yield f"event: error\ndata: {json.dumps({'error': 'GitHub token not configured'})}\n\n"
-        return StreamingResponse(err_gen(), media_type="text/event-stream")
+            yield f"event: error\ndata: {json.dumps({'error': 'OpenAI Codex is not connected'})}\n\n"
+            yield f"event: done\ndata: {json.dumps({'success': False, 'error': 'not_signed_in'})}\n\n"
+        return StreamingResponse(
+            err_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     session_id = request.session_id or f"copilot-{int(time.time())}"
 
@@ -273,7 +256,7 @@ async def copilot_chat_stream(request: CopilotChatRequest):
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
@@ -292,7 +275,6 @@ class CopilotLogQueryRequest(BaseModel):
     model: str = ""
     tables_used: List[str] = []
     db_identity: str = ""
-    github_username: str = ""
     error_message: Optional[str] = None
     tool_steps: List[Dict[str, Any]] = []
     usage: Dict[str, Any] = {}
@@ -301,8 +283,7 @@ class CopilotLogQueryRequest(BaseModel):
 @router.post("/log-query")
 async def log_copilot_query(request: CopilotLogQueryRequest):
     """
-    Log a copilot query after SSE streaming completes.
-    Stored in a separate copilot_query_logs table, keyed by github_username.
+    Log an OpenAI Codex query after SSE streaming completes.
     """
     try:
         token_usage = {
@@ -330,7 +311,7 @@ async def log_copilot_query(request: CopilotLogQueryRequest):
             })
 
         query_log_service.log_copilot_query(
-            github_username=request.github_username,
+            actor_identity="openai",
             session_id=request.session_id,
             user_query=request.user_query,
             generated_sql=request.generated_sql,
@@ -352,48 +333,14 @@ async def log_copilot_query(request: CopilotLogQueryRequest):
 @router.get("/logs")
 async def get_copilot_logs(
     limit: int = Query(default=100, ge=1, le=10000, description="Max logs to return"),
-    github_username: str = Query(default='', description="Filter by GitHub username"),
 ):
-    """Get copilot/MCP Agent query logs from the separate copilot table."""
+    """Get OpenAI Codex agent query logs."""
     try:
-        logs = query_log_service.get_copilot_logs(limit=limit, github_username=github_username or None)
+        logs = query_log_service.get_copilot_logs(limit=limit)
         return {"success": True, "logs": logs, "total": len(logs)}
     except Exception as e:
         logger.error(f"Error getting copilot logs: {e}")
         return {"success": False, "logs": [], "total": 0}
-
-
-@router.get("/auth/user")
-async def get_github_user():
-    """
-    Fetch the authenticated GitHub user's login from the stored token.
-    GET https://api.github.com/user
-    """
-    svc = get_copilot_service()
-    if not svc.is_configured or not svc._github_token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    import httpx
-    try:
-        async with httpx.AsyncClient(timeout=10.0, verify=False) as client:
-            resp = await client.get(
-                "https://api.github.com/user",
-                headers={
-                    "Authorization": f"token {svc._github_token}",
-                    "Accept": "application/json",
-                    "User-Agent": "QueryBench/1.0",
-                },
-            )
-            if resp.status_code != 200:
-                raise HTTPException(status_code=resp.status_code, detail="GitHub API error")
-            data = resp.json()
-            return {"username": data.get("login", ""), "name": data.get("name", ""), "avatar_url": data.get("avatar_url", "")}
-    except httpx.HTTPError as e:
-        err_str = str(e)
-        if "getaddrinfo" in err_str or "Name or service not known" in err_str:
-            err_str = "Cannot reach api.github.com (DNS failure). Check VPN/network connectivity."
-        elif not err_str:
-            err_str = f"Network error ({type(e).__name__}). Check VPN/network."
-        raise HTTPException(status_code=502, detail=err_str)
 
 
 # ── OAuth Device Flow ─────────────────────────────────────────────
@@ -401,13 +348,13 @@ async def get_github_user():
 @router.post("/auth/device-code")
 async def start_device_flow():
     """
-    Start GitHub OAuth Device Flow.
+    Start OpenAI Codex OAuth Device Flow.
     Returns a user_code and verification_uri.
     The user opens the URI in their browser and enters the code.
     """
     svc = get_copilot_service()
     try:
-        result = await svc.start_device_flow()
+        result = await svc.start_codex_device_flow()
         return result
     except Exception as e:
         logger.error(f"Device flow start failed: {e}")
@@ -423,7 +370,7 @@ async def poll_device_flow():
     """
     svc = get_copilot_service()
     try:
-        result = await svc.poll_device_flow()
+        result = await svc.poll_codex_device_flow()
         if result.get("status") == "complete":
             # Also return config so the UI knows we're configured
             cfg = svc.get_config()
@@ -436,11 +383,11 @@ async def poll_device_flow():
 
 
 @router.post("/auth/disconnect")
-async def disconnect_github():
-    """Sign out of GitHub OAuth — clears stored tokens."""
+async def disconnect_codex():
+    """Sign out of OpenAI Codex and clear stored OAuth tokens."""
     svc = get_copilot_service()
     svc.disconnect()
-    return {"status": "disconnected"}
+    return CopilotConfigResponse(**svc.get_config())
 
 
 @router.delete("/session/{session_id}")

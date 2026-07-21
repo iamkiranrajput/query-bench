@@ -12,12 +12,10 @@ npm install
 npm start
 ```
 
-Application runs at: `http://localhost:4280`
+Application runs at: `http://localhost:1111`
 
-Backend is expected at `http://localhost:8090` (or `http://<lan-ip>:8090`
-when running on a remote Ubuntu host). The UI auto-targets
-`http://${window.location.hostname}:8090` — see
-`src/environments/environment.ts`.
+Backend is expected at `http://localhost:2222`. The UI uses this explicit
+localhost URL from `src/environments/environment.ts`.
 
 ### Stopping the Dev Server
 ```bash
@@ -114,7 +112,7 @@ ui/
 ```typescript
 export const environment = {
   production: false,
-  apiUrl: 'http://localhost:8000'
+  apiUrl: 'http://localhost:2222'
 };
 ```
 

@@ -22,7 +22,7 @@ async def health_check():
     - Shows active session count
     - Includes timestamp
 
-    The AI engine is GitHub Copilot, which is authenticated per-user at
+    The AI engine is OpenAI Codex, which is authenticated per-user at
     runtime via the device-code flow, so there is no server-side LLM
     endpoint to probe here.
     """

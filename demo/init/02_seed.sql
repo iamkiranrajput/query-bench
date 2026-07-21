@@ -1,14 +1,13 @@
 -- Large procedural seed for the Query Bench demo database.
 --
--- Generates a sizeable, realistic, GEOSPATIAL retail dataset so the Foundry IQ
--- grounded demos have plenty of data to query:
+-- Generates a sizeable, realistic, GEOSPATIAL retail dataset for demos:
 --   * 100 stores      (PostGIS points across the Seattle metro)
 --   * 5,000 customers (each with a PostGIS home location + signup date)
 --   * 30,000 orders   (realistic status / amount / discount / refund / tax mix)
 --   * 24 products     (descriptions; embeddings populated by seed_embeddings.py)
 --
--- Coordinates use SRID 4326 (WGS84 lon/lat). The governed "downtown" reference
--- point in Foundry IQ knowledge is (-122.3321, 47.6062) — a cluster of stores
+-- Coordinates use SRID 4326 (WGS84 lon/lat). The demo "downtown" reference
+-- point is (-122.3321, 47.6062) — a cluster of stores
 -- and customers sit within ~5 km of it so proximity queries return data.
 --
 -- Reproducible via setseed(). Guarded so re-running does not duplicate rows.

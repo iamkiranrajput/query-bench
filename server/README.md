@@ -1,6 +1,6 @@
 # SQL Query Assistant — Backend Server
 
-FastAPI backend that pairs **GitHub Copilot Chat** models with a **Model
+FastAPI backend that pairs **OpenAI Codex** models with a **Model
 Context Protocol (MCP)** tool surface to turn natural-language questions into
 safe, validated SQL against your own relational database.
 
@@ -18,17 +18,17 @@ pip install -r requirements.txt
 # Configure environment
 cp .env.example .env
 # Edit .env — set SECRET_KEY (required, >= 32 chars).
-# GitHub Copilot is authenticated at runtime via device-code flow (no key in .env).
+# OpenAI Codex is authenticated at runtime via device-code flow (no API key in .env).
 
 # Run server
 python main.py
 ```
 
-Server runs at: `http://localhost:8090`
-API docs: `http://localhost:8090/api/docs`
+Server runs at: `http://localhost:2222`
+API docs: `http://localhost:2222/api/docs`
 
 > The default port comes from `PORT=` in `.env`. Override at any time, e.g.
-> `PORT=8000 python main.py`.
+> `PORT=2222 python main.py`.
 
 ### Stopping the Server
 ```bash
@@ -68,7 +68,7 @@ server/
 │   │   ├── performance_service.py # Performance monitoring
 │   │   ├── logger_service.py      # Logging configuration
 │   │   └── copilot/
-│   │       └── service.py         # GitHub Copilot agent loop (MCP tool calling)
+│   │       └── service.py         # OpenAI Codex agent loop (MCP tool calling)
 │   └── mcp_server/
 │       ├── server.py              # MCP server setup & tool registration
 │       ├── schema_index.py        # Optional FAISS semantic search index
@@ -107,7 +107,7 @@ See `.env.example` for all available settings. Key groups:
 | Server | `HOST`, `PORT`, `DEBUG` | Defaults provided |
 | Security | `SECRET_KEY` | **Yes** (min 32 chars) |
 | Auth (optional) | `API_KEY` | Optional bearer gate on `/api/*` |
-| GitHub Copilot | `COPILOT_DEFAULT_MODEL`, `COPILOT_TOKEN_ENC_KEY`, `COPILOT_AGENT_*` | Defaults provided; auth via device-code at runtime |
+| OpenAI Codex | `COPILOT_DEFAULT_MODEL`, `COPILOT_TOKEN_ENC_KEY`, `COPILOT_AGENT_*` | Defaults provided; OpenAI OAuth device login at runtime |
 | Sessions / limits | `SESSION_EXPIRY_HOURS`, `MAX_RESULT_ROWS`, `QUERY_TIMEOUT_SECONDS` | Defaults provided |
 | Query-log retention | `QUERY_LOG_RETENTION_DAYS`, `QUERY_LOG_REDACT_LITERALS` | Defaults provided |
 | Preset DB (optional) | `PRESET_DB_*` | Optional |
@@ -127,14 +127,13 @@ See `.env.example` for all available settings. Key groups:
 | POST | `/api/generate-schema` | Build/refresh the schema index for a session |
 | GET | `/api/health` | Health check |
 
-### GitHub Copilot Chat
+### OpenAI Codex Chat
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/copilot/auth/user` | Current Copilot auth status |
-| POST | `/api/copilot/auth/device-code` | Start GitHub device-code login |
+| POST | `/api/copilot/auth/device-code` | Start OpenAI device-code login |
 | POST | `/api/copilot/auth/poll` | Poll for device-code completion |
-| POST | `/api/copilot/auth/disconnect` | Clear stored Copilot token |
-| GET | `/api/copilot/models` | List available Copilot models |
+| POST | `/api/copilot/auth/disconnect` | Clear stored Codex OAuth token |
+| GET | `/api/copilot/models` | List Codex models available to the signed-in account |
 | POST | `/api/copilot/chat` | Run the agent loop (NL → MCP tools → answer) |
 | POST | `/api/copilot/chat/stream` | Streaming variant of `/chat` |
 | GET | `/api/copilot/logs` | Copilot execution logs (dashboard) |
@@ -176,4 +175,4 @@ See `.env.example` for all available settings. Key groups:
 ```
 
 To expose MCP over HTTP instead, set `MCP_HTTP_ENABLED=true` in `.env` and
-point your client at `http://localhost:8090/mcp`.
+point your client at `http://localhost:2222/mcp`.

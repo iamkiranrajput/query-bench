@@ -1,4 +1,4 @@
-"""GitHub Copilot service package exports."""
+"""OpenAI Codex agent service package exports."""
 
 from .service import CopilotService, get_copilot_service
 

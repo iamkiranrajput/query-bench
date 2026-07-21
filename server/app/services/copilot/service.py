@@ -1,24 +1,7 @@
-"""
-GitHub Copilot Integration Service
-
-Supports TWO auth methods (same as VS Code):
-
-A) OAuth Device Flow (recommended):
-   1. App requests a device code from GitHub
-   2. User opens github.com/login/device and enters the code
-   3. App polls GitHub until user approves → gets OAuth access token
-   4. Exchange access token for Copilot session token
-
-B) Personal Access Token (PAT):
-   1. User pastes a classic PAT
-   2. Exchange PAT for Copilot session token
-
-In both cases the final step is:
-   GET https://api.github.com/copilot_internal/v2/token
-   → short-lived Copilot JWT → api.githubcopilot.com/chat/completions
-"""
+"""OpenAI Codex OAuth service and MCP-backed SQL agent loop."""
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -114,40 +97,30 @@ def _build_ssl_context() -> ssl.SSLContext:
 _SSL_CTX = _build_ssl_context()
 
 # ── Endpoints ──────────────────────────────────────────────────────
-GITHUB_API_URL = "https://api.github.com"
-GITHUB_SITE_URL = "https://github.com"
-COPILOT_API_URL = "https://api.githubcopilot.com"
+CODEX_AUTH_BASE_URL = "https://auth.openai.com"
+CODEX_AUTH_ACCOUNTS_API_URL = f"{CODEX_AUTH_BASE_URL}/api/accounts"
+CODEX_VERIFICATION_URL = f"{CODEX_AUTH_BASE_URL}/codex/device"
+CODEX_OAUTH_REDIRECT_URI = f"{CODEX_AUTH_BASE_URL}/deviceauth/callback"
+CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
+CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models"
+CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_CLIENT_VERSION = os.environ.get("CODEX_CLIENT_VERSION", "0.145.0")
+PROVIDER_OPENAI_CODEX = "openai_codex"
 
-# ── OAuth Device Flow ──────────────────────────────────────────────
-# VS Code uses client_id 01ab8ac9400c4e429b23 for GitHub auth.
-# The Copilot CLI uses Iv1.b507a08c87ecfe98.
-# We use VS Code's client_id since the user already has Copilot via VS Code.
-GITHUB_CLIENT_ID = "01ab8ac9400c4e429b23"
 
-# ── Headers that VS Code sends (required by Copilot API) ──────────
-COPILOT_HEADERS = {
-    "Editor-Version": "vscode/1.100.0",
-    "Editor-Plugin-Version": "copilot-chat/0.25.2024",
-    "Copilot-Integration-Id": "vscode-chat",
-    "Openai-Organization": "github-copilot",
-    "Openai-Intent": "conversation-panel",
-}
+@dataclass
+class _ProviderResponse:
+    status_code: int
+    text: str
+    data: Dict[str, Any] = field(default_factory=dict)
 
-# ── Fallback model list ───────────────────────────────────────────
-KNOWN_MODELS = [
-    {"id": "gpt-4o", "name": "GPT-4o", "vendor": "OpenAI", "context_window": 128000},
-    {"id": "gpt-4o-mini", "name": "GPT-4o Mini", "vendor": "OpenAI", "context_window": 128000},
-    {"id": "gpt-4.1", "name": "GPT-4.1", "vendor": "OpenAI", "context_window": 1047576},
-    {"id": "claude-sonnet-4", "name": "Claude Sonnet 4", "vendor": "Anthropic", "context_window": 200000},
-    {"id": "claude-opus-4", "name": "Claude Opus 4", "vendor": "Anthropic", "context_window": 200000},
-    {"id": "o4-mini", "name": "o4-mini", "vendor": "OpenAI", "context_window": 200000},
-    {"id": "o3-mini", "name": "o3-mini", "vendor": "OpenAI", "context_window": 200000},
-]
+    def json(self) -> Dict[str, Any]:
+        return self.data
 
 # ── System prompt ─────────────────────────────────────────────────
 # The generic SQL-assistant guidance and agent behavioural rules live in
-# `app.mcp_server.system_prompt` so the GitHub-Copilot path (web UI)
-# and the VSCode-stdio MCP path share a single source of truth. The
+# `app.mcp_server.system_prompt` so the Codex web UI and stdio MCP path
+# share a single source of truth. The
 # response-format block is gated by `COPILOT_STRUCTURED_RESPONSE` so VSCode-
 # style free-form answers are the default.
 from app.mcp_server.system_prompt import (
@@ -190,6 +163,35 @@ CROSSPOD_HINT_SSH_CREDS_PROVIDED = ""
 _SSH_CRED_TOOLS: set[str] = set()
 _SSH_CRED_FIELDS: tuple[str, ...] = ()
 _SSH_SECRET_FIELDS: set[str] = set()
+
+
+def _compact_tool_result_for_sse(result: Any) -> Any:
+    """Keep live progress useful without streaming large database results twice."""
+    if not isinstance(result, dict):
+        return result
+    compact = dict(result)
+    compact.pop("csv_data", None)
+    records = compact.get("records")
+    if isinstance(records, list) and len(records) > 5:
+        compact["records"] = records[:5]
+        compact["row_count"] = compact.get("row_count", len(records))
+        compact["truncated_for_stream"] = True
+    values = compact.get("values")
+    if isinstance(values, list) and len(values) > 20:
+        compact["values"] = values[:20]
+        compact["value_count"] = compact.get("value_count", len(values))
+        compact["truncated_for_stream"] = True
+    tables = compact.get("tables")
+    if isinstance(tables, list) and len(tables) > 10:
+        compact["tables"] = tables[:10]
+        compact["table_count"] = compact.get("table_count", len(tables))
+        compact["truncated_for_stream"] = True
+    columns = compact.get("columns")
+    if isinstance(columns, list) and len(columns) > 25:
+        compact["columns"] = columns[:25]
+        compact["column_count"] = compact.get("column_count", len(columns))
+        compact["truncated_for_stream"] = True
+    return compact
 
 
 def _inject_ssh_credentials(
@@ -253,9 +255,8 @@ class CopilotResponse:
 # column, or an ungoverned definition). These helpers turn the agent's own
 # tool trace into four *earned* trust signals so the answer can be trusted:
 #   1. schema_validated -- SQL was checked against the live schema
-#   2. grounded         -- the answer cites >=1 governed Foundry IQ definition
-#   3. cross_checked    -- a 2nd independent query confirms the headline metric
-#   4. result_sane      -- the headline query returned non-empty, non-null data
+#   2. cross_checked    -- a 2nd independent query confirms the headline metric
+#   3. result_sane      -- the headline query returned non-empty, non-null data
 # Nothing here calls the model or the database; it only inspects results that
 # were already produced this turn.
 # ---------------------------------------------------------------------------
@@ -384,24 +385,7 @@ def _compute_trust(
                 break
     checks.append({"name": "Schema validated", "passed": schema_validated, "detail": schema_detail})
 
-    # ── 2. Governed grounding (Foundry IQ) ────────────────────────────
-    grounded_sources: List[Dict[str, Any]] = []
-    for tc in tool_calls:
-        if tc.tool_name == "retrieve_business_context" and tc.success and isinstance(tc.result, dict):
-            for c in (tc.result.get("citations") or []):
-                if isinstance(c, dict):
-                    grounded_sources.append({
-                        "title": c.get("title") or c.get("source") or "governed definition",
-                        "source": c.get("source") or "",
-                    })
-    grounded = len(grounded_sources) > 0
-    grounded_detail = (
-        f"Grounded in {len(grounded_sources)} governed Foundry IQ source(s)"
-        if grounded else "No governed business definition was applied"
-    )
-    checks.append({"name": "Governed grounding", "passed": grounded, "detail": grounded_detail})
-
-    # ── 3. Dual-path cross-check ──────────────────────────────────────
+    # ── 2. Dual-path cross-check ──────────────────────────────────────
     scalar_runs: List[tuple] = []  # (scalar_value, sql_text)
     in_query_pair: Optional[Dict[str, Any]] = None
     for tc in tool_calls:
@@ -471,7 +455,7 @@ def _compute_trust(
         cross_detail = "Independent cross-check was not run; we should verify that."
     checks.append({"name": "Cross-checked", "passed": cross_checked, "detail": cross_detail})
 
-    # ── 4. Result sanity ──────────────────────────────────────────────
+    # ── 3. Result sanity ──────────────────────────────────────────────
     result_sane = False
     if row_count and row_count > 0:
         result_sane = True
@@ -491,10 +475,9 @@ def _compute_trust(
 
     # ── Score & label ─────────────────────────────────────────────────
     weights = {
-        "Schema validated": 25,
-        "Governed grounding": 25,
-        "Cross-checked": 30,
-        "Result sanity": 20,
+        "Schema validated": 35,
+        "Cross-checked": 40,
+        "Result sanity": 25,
     }
     score = sum(weights.get(c["name"], 0) for c in checks if c["passed"])
     if verification is not None and not verification["agreed"]:
@@ -513,50 +496,43 @@ def _compute_trust(
         "trust_label": label,
         "trust_checks": checks,
         "verification": verification,
-        "grounded_sources": grounded_sources,
+        "grounded_sources": [],
     }
 
 
 class CopilotService:
     """
-    GitHub Copilot API client with OAuth Device Flow and PAT support.
+    OpenAI Codex OAuth client with an MCP-backed SQL agent loop.
     """
 
     # Persist token to survive server restarts
     _TOKEN_FILE = Path(__file__).resolve().parent.parent.parent / "data" / ".copilot_token.json"
-    # Persist most-recent successful live model list so a server restart doesn't
-    # drop us back to the 7-item KNOWN_MODELS fallback while the API warms up.
-    _MODELS_CACHE_FILE = Path(__file__).resolve().parent.parent.parent / "data" / ".copilot_models_cache.json"
-
     def __init__(self):
-        self._github_token: Optional[str] = None
-        self._default_model: str = "claude-opus-4"
-        # Copilot session token (short-lived, ~30 min)
-        self._copilot_token: Optional[str] = None
-        self._copilot_token_expires: int = 0
-        # OAuth device flow state
-        self._device_code: Optional[str] = None
-        self._cached_user_code: Optional[str] = None
-        self._device_code_expires: int = 0
-        self._device_poll_interval: int = 5
+        self._provider: str = PROVIDER_OPENAI_CODEX
+        self._codex_access_token: Optional[str] = None
+        self._codex_refresh_token: Optional[str] = None
+        self._codex_id_token: Optional[str] = None
+        self._codex_account_id: str = ""
+        self._codex_email: str = ""
+        self._codex_display_name: str = ""
+        self._codex_cached_models: List[Dict[str, Any]] = []
+        self._default_model: str = "gpt-5.6-sol"
+        # OpenAI OAuth device-flow state.
+        self._codex_device_auth_id: Optional[str] = None
+        self._codex_user_code: Optional[str] = None
+        self._codex_device_expires: int = 0
+        self._codex_poll_interval: int = 5
         # Per-session conversation history
         self._sessions: Dict[str, List[Dict[str, Any]]] = {}
         # Last error from list_models (surface in UI)
         self._last_models_fetch_error: Optional[str] = None
-        # In-memory copy of last successful live model fetch
-        self._cached_live_models: List[Dict[str, Any]] = []
-        # Concurrency guards (Phase A fixes):
-        # - _token_lock: serialize Copilot token refresh to prevent thundering herd
-        # - _session_locks: one asyncio.Lock per chat session_id so concurrent
+        # Concurrency guards: one asyncio.Lock per chat session_id so concurrent
         #   requests with the same session_id do not corrupt history.
         # - _session_locks_guard: protects _session_locks dict creation.
-        self._token_lock: asyncio.Lock = asyncio.Lock()
         self._session_locks: Dict[str, asyncio.Lock] = {}
         self._session_locks_guard: asyncio.Lock = asyncio.Lock()
         # Try to restore saved token
         self._load_token()
-        # Try to restore cached live model list (survives server restarts)
-        self._load_models_cache()
 
     async def _get_session_lock(self, session_id: str) -> asyncio.Lock:
         """Return (creating if needed) the asyncio.Lock for this chat session."""
@@ -617,10 +593,10 @@ class CopilotService:
         return os.name == "nt"
 
     # ── AES-GCM at-rest encryption for non-Windows hosts (Phase 3) ───
-    # The legacy code path wrote the GitHub OAuth token in plaintext to
+    # Legacy versions wrote OAuth tokens in plaintext to
     # `data/.copilot_token.json` whenever DPAPI wasn't available (i.e. any
     # Linux/macOS deployment). That token has the same blast radius as the
-    # user's GitHub session — if the file leaks (backup, container snapshot,
+    # user's OpenAI session — if the file leaks (backup, container snapshot,
     # accidental commit), the attacker can call Copilot on their behalf. We
     # now require an explicit 32-byte AES-256 key in the env var
     # `COPILOT_TOKEN_ENC_KEY` (base64-encoded). When the key is missing the
@@ -689,7 +665,7 @@ class CopilotService:
             return None
 
     def _load_token(self):
-        """Load persisted GitHub OAuth token (DPAPI-encrypted on Windows)."""
+        """Load a persisted OpenAI OAuth token."""
         try:
             if not self._TOKEN_FILE.exists():
                 return
@@ -700,12 +676,11 @@ class CopilotService:
                 try:
                     decrypted = self._dpapi_decrypt(raw)
                     data = json.loads(decrypted.decode("utf-8"))
-                    token = data.get("github_token", "")
-                    model = data.get("default_model", "claude-opus-4")
-                    if token:
-                        self._github_token = token
+                    self._restore_codex_fields(data)
+                    model = data.get("default_model", "gpt-5.6-sol")
+                    if self._codex_access_token:
                         self._default_model = model
-                        logger.info("Restored DPAPI-encrypted GitHub OAuth token")
+                        logger.info("Restored DPAPI-encrypted OpenAI OAuth token")
                         return
                 except Exception:
                     pass  # Fall through to AES-GCM / plaintext migration paths
@@ -715,12 +690,11 @@ class CopilotService:
             if decrypted is not None:
                 try:
                     data = json.loads(decrypted.decode("utf-8"))
-                    token = data.get("github_token", "")
-                    model = data.get("default_model", "claude-opus-4")
-                    if token:
-                        self._github_token = token
+                    self._restore_codex_fields(data)
+                    model = data.get("default_model", "gpt-5.6-sol")
+                    if self._codex_access_token:
                         self._default_model = model
-                        logger.info("Restored AES-GCM-encrypted GitHub OAuth token")
+                        logger.info("Restored AES-GCM-encrypted OpenAI OAuth token")
                         return
                 except Exception as e:
                     logger.warning(f"AES-GCM token blob present but JSON parse failed: {e}")
@@ -731,20 +705,19 @@ class CopilotService:
             # plaintext file so it doesn't sit on disk forever.
             try:
                 data = json.loads(raw.decode("utf-8"))
+                self._restore_codex_fields(data)
             except Exception:
                 logger.warning("Token file is not DPAPI, AES-GCM, or plaintext JSON — ignoring.")
                 return
-            token = data.get("github_token", "")
-            model = data.get("default_model", "claude-opus-4")
-            if not token:
+            model = data.get("default_model", "gpt-5.6-sol")
+            if not self._codex_access_token:
                 return
-            self._github_token = token
             self._default_model = model
             if self._is_windows():
-                logger.info("Restored GitHub OAuth token from disk (plaintext) — migrating to DPAPI")
+                logger.info("Restored OpenAI OAuth token from disk (plaintext) — migrating to DPAPI")
                 self._save_token()
             elif self._load_token_enc_key() is not None:
-                logger.info("Restored GitHub OAuth token from disk (plaintext) — migrating to AES-GCM")
+                logger.info("Restored OpenAI OAuth token from disk (plaintext) — migrating to AES-GCM")
                 self._save_token()
             else:
                 logger.warning(
@@ -761,26 +734,31 @@ class CopilotService:
             logger.warning(f"Could not load saved token: {e}")
 
     def _save_token(self):
-        """Persist GitHub OAuth token (DPAPI on Windows, AES-GCM elsewhere).
+        """Persist OpenAI OAuth tokens (DPAPI on Windows, AES-GCM elsewhere).
         Refuses to write plaintext: if no encryption is available the token
         stays in memory only and the user must re-authenticate after restart."""
         try:
             self._TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
             payload = json.dumps({
-                "github_token": self._github_token or "",
+                "codex_access_token": self._codex_access_token or "",
+                "codex_refresh_token": self._codex_refresh_token or "",
+                "codex_id_token": self._codex_id_token or "",
+                "codex_account_id": self._codex_account_id,
+                "codex_email": self._codex_email,
+                "codex_display_name": self._codex_display_name,
                 "default_model": self._default_model,
             }).encode("utf-8")
 
             if self._is_windows():
                 encrypted = self._dpapi_encrypt(payload)
                 self._TOKEN_FILE.write_bytes(encrypted)
-                logger.info("Saved DPAPI-encrypted GitHub OAuth token to disk")
+                logger.info("Saved DPAPI-encrypted OpenAI OAuth token to disk")
                 return
 
             enc = self._aesgcm_encrypt(payload)
             if enc is None:
                 logger.warning(
-                    "COPILOT_TOKEN_ENC_KEY is not set — GitHub OAuth token will NOT be "
+                    "COPILOT_TOKEN_ENC_KEY is not set — OpenAI OAuth token will NOT be "
                     "written to disk. Re-authenticate after every restart, or generate "
                     "a key with: python -c \"import base64,os; print(base64.b64encode(os.urandom(32)).decode())\" "
                     "and put it in .env as COPILOT_TOKEN_ENC_KEY."
@@ -799,67 +777,63 @@ class CopilotService:
                 os.chmod(self._TOKEN_FILE, 0o600)
             except Exception:
                 pass
-            logger.info("Saved AES-GCM-encrypted GitHub OAuth token to disk (mode 600)")
+            logger.info("Saved AES-GCM-encrypted OpenAI OAuth token to disk (mode 600)")
         except Exception as e:
             logger.warning(f"Could not save token: {e}")
 
-    def _load_models_cache(self) -> None:
-        """Restore the last successful live model fetch from disk so we
-        don't fall back to the 7-item KNOWN_MODELS list on a cold start.
-        Best-effort: failures are silent."""
-        try:
-            if not self._MODELS_CACHE_FILE.exists():
-                return
-            data = json.loads(self._MODELS_CACHE_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, list) and data:
-                self._cached_live_models = [m for m in data if isinstance(m, dict) and m.get("id")]
-                logger.info(f"Restored {len(self._cached_live_models)} cached live models")
-        except Exception as e:
-            logger.warning(f"Could not load models cache: {e}")
-
-    def _save_models_cache(self, models: List[Dict[str, Any]]) -> None:
-        """Persist the latest live model fetch (best-effort, non-fatal)."""
-        try:
-            self._MODELS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-            self._MODELS_CACHE_FILE.write_text(
-                json.dumps(models, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            logger.warning(f"Could not save models cache: {e}")
-
     @property
     def is_configured(self) -> bool:
-        return bool(self._github_token)
+        return bool(self._codex_access_token)
 
-    def configure(self, github_token: str, default_model: str = "claude-opus-4"):
-        """Set the GitHub token (PAT or OAuth) and default model."""
-        self._github_token = github_token
-        if default_model:
-            self._default_model = default_model
-        # Invalidate cached Copilot token
-        self._copilot_token = None
-        self._copilot_token_expires = 0
-        self._save_token()
-        logger.info(f"Copilot service configured with model={self._default_model}")
+    @staticmethod
+    def _decode_jwt_payload(token: Optional[str]) -> Dict[str, Any]:
+        if not token:
+            return {}
+        try:
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            decoded = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+            return decoded if isinstance(decoded, dict) else {}
+        except Exception:
+            return {}
+
+    def _restore_codex_fields(self, data: Dict[str, Any]) -> None:
+        self._codex_access_token = data.get("codex_access_token") or None
+        self._codex_refresh_token = data.get("codex_refresh_token") or None
+        self._codex_id_token = data.get("codex_id_token") or None
+        claims = self._decode_jwt_payload(self._codex_id_token)
+        auth = claims.get("https://api.openai.com/auth") or {}
+        profile = claims.get("https://api.openai.com/profile") or {}
+        self._codex_account_id = str(data.get("codex_account_id") or auth.get("chatgpt_account_id") or "")
+        self._codex_email = str(data.get("codex_email") or claims.get("email") or profile.get("email") or "")
+        self._codex_display_name = str(data.get("codex_display_name") or claims.get("name") or profile.get("name") or "")
 
     def disconnect(self):
-        """Clear all tokens and remove persisted token file."""
-        self._github_token = None
-        self._copilot_token = None
-        self._copilot_token_expires = 0
+        """Clear OpenAI Codex OAuth credentials."""
+        self._codex_access_token = None
+        self._codex_refresh_token = None
+        self._codex_id_token = None
+        self._codex_account_id = ""
+        self._codex_email = ""
+        self._codex_display_name = ""
+        self._codex_cached_models = []
         try:
             if self._TOKEN_FILE.exists():
                 self._TOKEN_FILE.unlink()
-                logger.info("Deleted persisted token file")
+                logger.info("Deleted persisted OpenAI OAuth token file")
         except Exception as e:
             logger.warning(f"Could not delete token file: {e}")
 
     def get_config(self) -> Dict[str, Any]:
         return {
+            "provider": self._provider,
             "configured": self.is_configured,
             "default_model": self._default_model,
-            "has_token": bool(self._github_token),
+            "has_token": self.is_configured,
+            "has_codex_token": bool(self._codex_access_token),
+            "codex_email": self._codex_email,
+            "codex_display_name": self._codex_display_name,
+            "codex_account_id": self._codex_account_id,
         }
 
     # ── Cross-database connections ─────────────────────────────────
@@ -876,402 +850,199 @@ class CopilotService:
 
     # ── OAuth Device Flow ──────────────────────────────────────────
 
-    async def start_device_flow(self) -> Dict[str, Any]:
-        """
-        Step 1 of OAuth Device Flow.
-        POST https://github.com/login/device/code
-        Returns: { user_code, verification_uri, device_code, interval, expires_in }
-
-        The user opens verification_uri in their browser and enters user_code.
-        """
-        # If a device flow is already active and not expired, return the existing code
-        if self._device_code and int(time.time()) < self._device_code_expires:
-            print(f"[DEVICE_FLOW] Reusing existing device flow (expires in {self._device_code_expires - int(time.time())}s)")
+    async def start_codex_device_flow(self) -> Dict[str, Any]:
+        """Start the Codex device authorization flow."""
+        now = int(time.time())
+        if self._codex_device_auth_id and self._codex_user_code and now < self._codex_device_expires:
             return {
-                "user_code": self._cached_user_code or "",
-                "verification_uri": "https://github.com/login/device",
-                "expires_in": self._device_code_expires - int(time.time()),
-                "interval": self._device_poll_interval,
+                "provider": PROVIDER_OPENAI_CODEX,
+                "user_code": self._codex_user_code,
+                "verification_uri": CODEX_VERIFICATION_URL,
+                "expires_in": self._codex_device_expires - now,
+                "interval": self._codex_poll_interval,
             }
-
-        async with httpx.AsyncClient(timeout=5.0, verify=_SSL_CTX) as client:
+        async with httpx.AsyncClient(timeout=15.0, verify=_SSL_CTX) as client:
             resp = await client.post(
-                f"{GITHUB_SITE_URL}/login/device/code",
-                headers={
-                    "Accept": "application/json",
-                },
-                data={
-                    "client_id": GITHUB_CLIENT_ID,
-                    "scope": "user:email",
-                },
+                f"{CODEX_AUTH_ACCOUNTS_API_URL}/deviceauth/usercode",
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
+                json={"client_id": CODEX_CLIENT_ID},
             )
-            print(f"[DEVICE_FLOW] /login/device/code: {resp.status_code} | {resp.text[:500]}")
+        if resp.status_code != 200:
+            if resp.status_code == 404:
+                raise Exception("Device code login is not enabled. Turn it on in ChatGPT security settings.")
+            raise Exception(f"Codex device code request failed ({resp.status_code}): {resp.text[:300]}")
+        data = resp.json()
+        user_code = data.get("user_code") or data.get("usercode") or ""
+        device_auth_id = data.get("device_auth_id") or data.get("deviceAuthId") or ""
+        if not user_code or not device_auth_id:
+            raise Exception("Codex device code response did not include a user code.")
+        expires_in = int(data.get("expires_in") or data.get("expires") or 900)
+        interval = int(data.get("interval") or 5)
+        self._codex_device_auth_id = str(device_auth_id)
+        self._codex_user_code = str(user_code)
+        self._codex_device_expires = now + expires_in
+        self._codex_poll_interval = interval
+        return {
+            "provider": PROVIDER_OPENAI_CODEX,
+            "user_code": self._codex_user_code,
+            "verification_uri": CODEX_VERIFICATION_URL,
+            "expires_in": expires_in,
+            "interval": interval,
+        }
 
-            if resp.status_code != 200:
-                raise Exception(f"Failed to start device flow: {resp.status_code} {resp.text[:300]}")
-
-            data = resp.json()
-            self._device_code = data.get("device_code", "")
-            self._cached_user_code = data.get("user_code", "")
-            self._device_code_expires = int(time.time()) + data.get("expires_in", 900)
-            self._device_poll_interval = data.get("interval", 5)
-
-            return {
-                "user_code": data.get("user_code", ""),
-                "verification_uri": data.get("verification_uri", "https://github.com/login/device"),
-                "expires_in": data.get("expires_in", 900),
-                "interval": self._device_poll_interval,
-            }
-
-    async def poll_device_flow(self) -> Dict[str, Any]:
-        """
-        Step 2 of OAuth Device Flow.
-        POST https://github.com/login/oauth/access_token
-        Polls until the user has approved or the code expires.
-
-        Returns: { status: 'pending' | 'complete' | 'expired', ... }
-        """
-        if not self._device_code:
-            raise Exception("No device flow in progress. Call start_device_flow first.")
-
-        if int(time.time()) > self._device_code_expires:
-            self._device_code = None
+    async def poll_codex_device_flow(self) -> Dict[str, Any]:
+        """Poll Codex device authorization once."""
+        if not self._codex_device_auth_id or not self._codex_user_code:
+            raise Exception("No Codex device flow in progress. Start sign-in first.")
+        if int(time.time()) > self._codex_device_expires:
+            self._clear_codex_device_flow()
             return {"status": "expired"}
-
-        async with httpx.AsyncClient(timeout=5.0, verify=_SSL_CTX) as client:
+        async with httpx.AsyncClient(timeout=15.0, verify=_SSL_CTX) as client:
             try:
                 resp = await client.post(
-                    f"{GITHUB_SITE_URL}/login/oauth/access_token",
-                    headers={
-                        "Accept": "application/json",
-                    },
-                    data={
-                        "client_id": GITHUB_CLIENT_ID,
-                        "device_code": self._device_code,
-                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-                    },
+                    f"{CODEX_AUTH_ACCOUNTS_API_URL}/deviceauth/token",
+                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                    json={"device_auth_id": self._codex_device_auth_id, "user_code": self._codex_user_code},
                 )
-            except (httpx.TimeoutException, httpx.ConnectError) as e:
-                # Network flaky — treat as "pending" so UI keeps polling
-                logger.debug(f"[DEVICE_FLOW] Poll network error ({type(e).__name__}), treating as pending")
-                return {"status": "pending", "network_error": True}
-            print(f"[DEVICE_FLOW] Poll response: {resp.status_code} | {resp.text[:500]}")
+            except (httpx.TimeoutException, httpx.ConnectError):
+                return {"status": "pending", "interval": self._codex_poll_interval}
+        if resp.status_code in (403, 404):
+            return {"status": "pending", "interval": self._codex_poll_interval}
+        if resp.status_code != 200:
+            raise Exception(f"Codex device auth polling failed ({resp.status_code}): {resp.text[:300]}")
+        data = resp.json()
+        authorization_code = data.get("authorization_code") or ""
+        code_verifier = data.get("code_verifier") or ""
+        if not authorization_code or not code_verifier:
+            return {"status": "pending", "interval": self._codex_poll_interval}
+        tokens = await self._exchange_codex_code_for_tokens(authorization_code, code_verifier)
+        self._store_codex_tokens(tokens)
+        self._clear_codex_device_flow()
+        self._provider = PROVIDER_OPENAI_CODEX
+        models = await self._list_codex_models()
+        if models:
+            self._default_model = models[0]["id"]
+        self._save_token()
+        return {"status": "complete", **self.get_config()}
 
-            if resp.status_code != 200:
-                raise Exception(f"Poll failed: {resp.status_code} {resp.text[:300]}")
+    def _clear_codex_device_flow(self) -> None:
+        self._codex_device_auth_id = None
+        self._codex_user_code = None
+        self._codex_device_expires = 0
 
-            data = resp.json()
-            error = data.get("error", "")
-
-            if error == "authorization_pending":
-                return {"status": "pending"}
-            elif error == "slow_down":
-                # Use the interval GitHub tells us, not our own cumulative value
-                new_interval = data.get("interval", self._device_poll_interval + 5)
-                self._device_poll_interval = new_interval
-                return {"status": "pending", "interval": new_interval}
-            elif error == "expired_token":
-                self._device_code = None
-                return {"status": "expired"}
-            elif error == "access_denied":
-                self._device_code = None
-                return {"status": "denied"}
-            elif error:
-                return {"status": "error", "error": data.get("error_description", error)}
-
-            # Success! We got an access token
-            access_token = data.get("access_token", "")
-            if access_token:
-                self._device_code = None
-                self._cached_user_code = None
-                # Store the OAuth token as our GitHub token
-                self.configure(access_token, self._default_model)
-                print(f"[DEVICE_FLOW] ✅ OAuth complete — access_token acquired (len={len(access_token)})")
-
-                # Verify it works by doing the Copilot token exchange
-                try:
-                    await self._get_copilot_token()
-                    return {"status": "complete"}
-                except Exception as e:
-                    logger.error(f"Copilot token exchange after OAuth failed: {e}")
-                    return {
-                        "status": "complete",
-                        "warning": str(e),
-                    }
-
-            return {"status": "error", "error": "No access token in response"}
-
-    # ── Copilot Token Exchange ─────────────────────────────────────
-
-    async def _get_copilot_token(self) -> str:
-        """
-        Exchange GitHub token for a short-lived Copilot session token.
-        GET https://api.github.com/copilot_internal/v2/token
-        Authorization: token <github_token>
-        """
-        now = int(time.time())
-
-        # Fast-path: cached token still valid (60s buffer) — no lock needed
-        if self._copilot_token and self._copilot_token_expires > (now + 60):
-            return self._copilot_token
-
-        if not self._github_token:
-            raise Exception("GitHub token not configured")
-
-        # Serialize refresh so N concurrent callers don't all hit GitHub.
-        async with self._token_lock:
-            # Re-check inside the lock: another coroutine may have just refreshed.
-            now = int(time.time())
-            if self._copilot_token and self._copilot_token_expires > (now + 60):
-                return self._copilot_token
-            return await self._do_token_exchange(now)
-
-    async def _do_token_exchange(self, now: int) -> str:
-        """Actual HTTP token exchange. Caller must hold _token_lock."""
-        async with httpx.AsyncClient(timeout=5.0, verify=_SSL_CTX) as client:
-            logger.info(f"Token exchange: GET {GITHUB_API_URL}/copilot_internal/v2/token")
-            try:
-                resp = await client.get(
-                    f"{GITHUB_API_URL}/copilot_internal/v2/token",
-                    headers={
-                        "Authorization": f"token {self._github_token}",
-                        "Accept": "application/json",
-                        "User-Agent": "GitHubCopilotChat/0.25.2024",
-                    },
-                )
-            except httpx.ConnectError as e:
-                err = str(e)
-                if "getaddrinfo" in err or "Name or service not known" in err:
-                    raise Exception(
-                        "Cannot resolve api.github.com (DNS failure). "
-                        "Check VPN/proxy — GitHub APIs must be reachable from this network."
-                    ) from e
-                raise Exception(f"Cannot connect to api.github.com: {err}") from e
-            except httpx.TimeoutException:
-                raise Exception(
-                    "Connection to api.github.com timed out. Check VPN/network connectivity."
-                )
-            logger.info(
-                f"Token exchange response: {resp.status_code} | "
-                f"body={resp.text[:500]}"
+    async def _exchange_codex_code_for_tokens(self, authorization_code: str, code_verifier: str) -> Dict[str, Any]:
+        async with httpx.AsyncClient(timeout=20.0, verify=_SSL_CTX) as client:
+            resp = await client.post(
+                f"{CODEX_AUTH_BASE_URL}/oauth/token",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "grant_type": "authorization_code",
+                    "client_id": CODEX_CLIENT_ID,
+                    "code": authorization_code,
+                    "code_verifier": code_verifier,
+                    "redirect_uri": CODEX_OAUTH_REDIRECT_URI,
+                },
             )
+        if resp.status_code != 200:
+            raise Exception(f"Codex token exchange failed ({resp.status_code}): {resp.text[:300]}")
+        return resp.json()
 
-            if resp.status_code == 200:
-                data = resp.json()
-                self._copilot_token = data.get("token", "")
-                self._copilot_token_expires = data.get("expires_at", 0)
-                logger.info(
-                    f"Copilot token acquired, expires in "
-                    f"{self._copilot_token_expires - now}s"
-                )
-                return self._copilot_token
-
-            elif resp.status_code == 401:
-                body = resp.text[:500]
-                logger.error(f"Token exchange 401: {body}")
-                raise Exception(
-                    f"GitHub token rejected (401): {body}. "
-                    "Try signing in again via the GitHub OAuth flow."
-                )
-            elif resp.status_code == 403:
-                raise Exception(
-                    "Your GitHub account doesn't have an active Copilot subscription. "
-                    "Check your subscription at github.com/settings/copilot"
-                )
-            else:
-                body = resp.text[:500]
-                raise Exception(
-                    f"Copilot token exchange failed ({resp.status_code}): {body}"
-                )
+    def _store_codex_tokens(self, tokens: Dict[str, Any]) -> None:
+        access_token = str(tokens.get("access_token") or "")
+        if not access_token:
+            raise Exception("Codex token exchange did not return an access token.")
+        self._codex_access_token = access_token
+        self._codex_refresh_token = str(tokens.get("refresh_token") or "")
+        self._codex_id_token = str(tokens.get("id_token") or "")
+        self._restore_codex_fields({
+            "codex_access_token": self._codex_access_token,
+            "codex_refresh_token": self._codex_refresh_token,
+            "codex_id_token": self._codex_id_token,
+        })
 
     # ── Model listing ──────────────────────────────────────────────
 
+    @staticmethod
+    def _normalize_codex_models(raw_models: Any) -> List[Dict[str, Any]]:
+        if not isinstance(raw_models, list):
+            return []
+        # Keep the complete account catalog. Codex marks older/preview models
+        # as `visibility=hide`; that flag controls its default UI, not whether
+        # QueryBench should omit them from an explicit "all models" picker.
+        visible = [model for model in raw_models if isinstance(model, dict) and model.get("slug")]
+        visible.sort(key=lambda model: int(model.get("priority") or 999_999))
+        return [{
+            "id": str(model.get("slug")),
+            "name": str(model.get("display_name") or model.get("slug")),
+            "vendor": "OpenAI",
+            "context_window": int(model.get("context_window") or model.get("context_window_tokens") or 0),
+            "default_reasoning_level": model.get("default_reasoning_level"),
+            # codex-auto-review is an internal review preset, not an interactive
+            # Responses API model. Keep it visible in the complete catalog but
+            # prevent selecting it for database chat.
+            "supported_in_api": bool(model.get("supported_in_api", True))
+                and str(model.get("slug")) != "codex-auto-review",
+            "visibility": str(model.get("visibility") or "list"),
+        } for model in visible]
+
+    @staticmethod
+    def _codex_client_version() -> str:
+        """Use an explicit override, otherwise mirror the installed Codex catalog version."""
+        explicit = (os.environ.get("CODEX_CLIENT_VERSION") or "").strip()
+        if explicit:
+            return explicit
+        cache_path = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "models_cache.json"
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            version = str(cached.get("client_version") or "").strip() if isinstance(cached, dict) else ""
+            if version:
+                return version
+        except Exception:
+            pass
+        return CODEX_CLIENT_VERSION
+
+    @staticmethod
+    def _load_codex_fallback_models() -> List[Dict[str, Any]]:
+        cache_path = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")) / "models_cache.json"
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+            return CopilotService._normalize_codex_models(cache.get("models") if isinstance(cache, dict) else [])
+        except Exception:
+            return []
+
+    async def _list_codex_models(self) -> List[Dict[str, Any]]:
+        if not self._codex_access_token:
+            return []
+        try:
+            async with httpx.AsyncClient(timeout=30.0, verify=_SSL_CTX) as client:
+                resp = await client.get(
+                    CODEX_MODELS_URL,
+                    params={"client_version": self._codex_client_version()},
+                    headers={"Authorization": f"Bearer {self._codex_access_token}", "Accept": "application/json"},
+                )
+            if resp.status_code != 200:
+                raise Exception(f"Codex models returned HTTP {resp.status_code}: {resp.text[:300]}")
+            payload = resp.json()
+            models = self._normalize_codex_models(payload.get("models") if isinstance(payload, dict) else [])
+            if not models:
+                raise Exception("No Codex models are available for this account.")
+            self._codex_cached_models = models
+            usable_models = [model for model in models if model.get("supported_in_api")]
+            usable_ids = {model["id"] for model in usable_models}
+            if usable_models and self._default_model not in usable_ids:
+                self._default_model = usable_models[0]["id"]
+                self._save_token()
+            return models
+        except Exception as exc:
+            self._last_models_fetch_error = str(exc)
+            logger.warning("Failed to fetch Codex models: %s", exc)
+            return self._codex_cached_models or self._load_codex_fallback_models()
+
     async def list_models(self) -> List[Dict[str, Any]]:
-        """Fetch available models from the Copilot API.
-
-        Resilience strategy:
-          1. If no GitHub token is configured, return last cached live list
-             (if any), else KNOWN_MODELS.
-          2. Try GET /models with a 15s timeout. On 401/403, force a fresh
-             Copilot session token and retry once.
-          3. On any success, persist the live list to disk so the next cold
-             start serves it immediately instead of the 7-item fallback.
-          4. On any failure, return last cached live list (if any), else
-             KNOWN_MODELS, and remember the error for the UI to display.
-        """
-        # No token \u2192 fall back without hitting the API
-        if not self._github_token:
-            self._last_models_fetch_error = "GitHub token not configured"
-            return list(self._cached_live_models) if self._cached_live_models else list(KNOWN_MODELS)
-
-        last_err: Optional[str] = None
-        for attempt in (1, 2):
-            try:
-                if attempt == 2:
-                    # Force a fresh Copilot session token on retry
-                    self._copilot_token = None
-                    self._copilot_token_expires = 0
-                copilot_token = await self._get_copilot_token()
-                async with httpx.AsyncClient(timeout=15.0, verify=_SSL_CTX) as client:
-                    resp = await client.get(
-                        f"{COPILOT_API_URL}/models",
-                        headers={
-                            "Authorization": f"Bearer {copilot_token}",
-                            **COPILOT_HEADERS,
-                        },
-                    )
-
-                if resp.status_code in (401, 403) and attempt == 1:
-                    last_err = f"HTTP {resp.status_code} (auth) \u2014 retrying with fresh token"
-                    logger.info(f"Copilot /models {resp.status_code}; refreshing session token and retrying")
-                    continue
-
-                if resp.status_code != 200:
-                    last_err = f"Copilot /models returned HTTP {resp.status_code}"
-                    logger.warning(last_err)
-                    break
-
-                data = resp.json()
-                model_list = data.get("data", data) if isinstance(data, dict) else data
-                models: List[Dict[str, Any]] = []
-                if isinstance(model_list, list):
-                    for m in model_list:
-                        if not isinstance(m, dict):
-                            continue
-                        mid = m.get("id", m.get("name", ""))
-                        mid = self._clean_model_id(mid)
-                        if not mid:
-                            continue
-                        name = m.get("name", m.get("friendly_name", mid))
-                        if isinstance(name, str) and name.startswith("azureml://"):
-                            name = mid
-                        if not isinstance(name, str):
-                            name = mid
-                        # Skip non-chat models
-                        name_check = (mid + " " + name).lower()
-                        if any(kw in name_check for kw in (
-                            "embed", "embedding", "whisper", "tts",
-                            "dall-e", "jais", "safety", "moderation",
-                            "codex", "code-",
-                        )):
-                            continue
-                        # Check model capabilities - skip if not chat-compatible
-                        caps = m.get("capabilities", {})
-                        if isinstance(caps, dict):
-                            cap_type = caps.get("type", "")
-                            if cap_type and cap_type != "chat":
-                                continue
-                        vendor = m.get("publisher") or m.get("owned_by") or ""
-                        if not isinstance(vendor, str):
-                            vendor = ""
-                        if not vendor or vendor.lower() in ("unknown", "azureml", "azure"):
-                            vendor = self._infer_vendor(mid, name)
-                        # NOTE: do NOT overwrite the display name with
-                        # caps["family"] — that collapses every version of a
-                        # family (gpt-4o, gpt-4o-mini, dated snapshots) to one
-                        # label and hides the individual models. Keep the
-                        # API's distinct friendly name instead.
-                        ctx = 0
-                        limits = m.get("model_limits", {})
-                        if isinstance(limits, dict):
-                            ctx = limits.get("max_context_window", 0) or 0
-                        models.append({
-                            "id": mid,
-                            "name": name,
-                            "vendor": vendor,
-                            "context_window": ctx,
-                        })
-
-                if models:
-                    # Deduplicate by model id ONLY. The API can return literal
-                    # duplicate ids, but every distinct id is a distinct model
-                    # we want to show (all versions/variants of a family).
-                    # When two distinct ids share the same friendly name, the
-                    # display label is disambiguated with the id so the picker
-                    # still lists every model.
-                    _seen_ids: set = set()
-                    _used_names: set = set()
-                    _deduped: List[Dict[str, Any]] = []
-                    for _m in models:
-                        _id_key = (_m.get("id") or "").lower()
-                        if not _id_key or _id_key in _seen_ids:
-                            continue
-                        _seen_ids.add(_id_key)
-                        _nm = _m.get("name") or _m.get("id")
-                        if _nm in _used_names:
-                            _m["name"] = f"{_nm} ({_m.get('id')})"
-                        _used_names.add(_nm)
-                        _deduped.append(_m)
-                    models = _deduped
-                    # Stable sort: vendor, then by name
-                    models.sort(key=lambda x: (x.get("vendor", ""), x.get("name", "")))
-                    self._cached_live_models = models
-                    self._last_models_fetch_error = None
-                    self._save_models_cache(models)
-                    logger.info(f"Loaded {len(models)} models from Copilot API")
-                    return models
-
-                last_err = "Copilot API returned 200 but produced 0 chat models after filtering"
-                logger.warning(last_err)
-                break
-
-            except Exception as e:
-                last_err = f"{type(e).__name__}: {e}"
-                logger.warning(f"Failed to fetch Copilot models (attempt {attempt}): {last_err}")
-                if attempt == 1:
-                    continue
-                break
-
-        # Live fetch failed \u2014 fall back to last good cache, else KNOWN_MODELS
-        self._last_models_fetch_error = last_err
-        if self._cached_live_models:
-            logger.info(f"Serving {len(self._cached_live_models)} cached live models (live fetch failed)")
-            return list(self._cached_live_models)
-        return list(KNOWN_MODELS)
-
-    @staticmethod
-    def _clean_model_id(raw_id: str) -> str:
-        """Extract clean model ID from Azure ML URIs."""
-        if not raw_id:
-            return ""
-        m = re.search(r'/models/([^/]+)', raw_id)
-        if m:
-            return m.group(1)
-        return raw_id
-
-    @staticmethod
-    def _infer_vendor(model_id: str, name: str = "") -> str:
-        """Infer the vendor from the model id/name when the Copilot API
-        doesn't return a `publisher` or `owned_by` field. Falls back to
-        ``"Other"`` for unrecognised models so the UI doesn't dump
-        everything into a generic "Unknown" group.
-        """
-        s = f"{model_id} {name}".lower()
-        # Order matters: check more specific tokens before generic ones.
-        if "claude" in s or "anthropic" in s:
-            return "Anthropic"
-        if "gemini" in s or "bison" in s or "palm" in s or s.startswith("google"):
-            return "Google"
-        if "grok" in s:
-            return "xAI"
-        if "llama" in s or "meta-" in s:
-            return "Meta"
-        if "mistral" in s or "mixtral" in s or "codestral" in s:
-            return "Mistral"
-        if "phi" in s or "deepseek" in s.split() or s.startswith("deepseek"):
-            return "DeepSeek" if "deepseek" in s else "Microsoft"
-        if "command" in s or "cohere" in s:
-            return "Cohere"
-        if (
-            s.startswith("gpt")
-            or "gpt-" in s
-            or s.startswith("o1")
-            or s.startswith("o3")
-            or s.startswith("o4")
-            or "openai" in s
-        ):
-            return "OpenAI"
-        return "Other"
+        """Return every model exposed by the signed-in Codex account."""
+        if self._codex_access_token:
+            return await self._list_codex_models()
+        return self._load_codex_fallback_models()
 
     # ── MCP tools -> OpenAI function definitions ───────────────────
 
@@ -1279,8 +1050,7 @@ class CopilotService:
     # context internally — those are stateful infrastructure, not LLM-callable
     # actions). `check_db_integrity` USED to be excluded as a long-running
     # admin probe, but the schema-driven gating in the tool itself plus the
-    # bumped agent wall-clock budget make it safe to expose for parity with
-    # VSCode Copilot Chat.
+    # bumped agent wall-clock budget make it safe to expose.
     _EXCLUDED_TOOLS = {
         "connect_database",
         "get_conversation_context",
@@ -1336,6 +1106,11 @@ class CopilotService:
     ) -> str:
         """Build system prompt with available database connections + cross-pod policy."""
         prompt = _compose_system_prompt_base()
+        try:
+            from app.services.database_context_service import get_database_context_store
+            prompt += get_database_context_store().build_prompt(current_db_session_id)
+        except Exception as exc:
+            logger.warning("Could not load user database context: %s", exc)
         if self._saved_connections:
             db_lines = []
             for c in self._saved_connections:
@@ -1362,6 +1137,148 @@ class CopilotService:
             prompt += CROSSPOD_HINT_SSH_CREDS_PROVIDED
         return prompt
 
+    def _build_codex_payload(
+        self,
+        model_id: str,
+        history: List[Dict[str, Any]],
+        tool_defs: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        instructions: List[str] = []
+        items: List[Dict[str, Any]] = []
+        for message in history:
+            role = str(message.get("role") or "")
+            content = str(message.get("content") or "")
+            if role == "system":
+                if content:
+                    instructions.append(content)
+                continue
+            if role == "tool":
+                call_id = str(message.get("tool_call_id") or "")
+                if call_id:
+                    items.append({"type": "function_call_output", "call_id": call_id, "output": content})
+                continue
+            if role in {"user", "assistant"} and content:
+                items.append({
+                    "type": "message",
+                    "role": role,
+                    "content": [{"type": "input_text" if role == "user" else "output_text", "text": content}],
+                })
+            for tool_call in message.get("tool_calls") or []:
+                fn = tool_call.get("function") or {}
+                if fn.get("name"):
+                    arguments = fn.get("arguments", "{}")
+                    if not isinstance(arguments, str):
+                        arguments = json.dumps(arguments, default=str)
+                    items.append({
+                        "type": "function_call",
+                        "call_id": str(tool_call.get("id") or ""),
+                        "name": str(fn["name"]),
+                        "arguments": arguments,
+                    })
+        tools = []
+        for definition in tool_defs:
+            fn = definition.get("function") or {}
+            if fn.get("name"):
+                tools.append({
+                    "type": "function",
+                    "name": fn["name"],
+                    "description": fn.get("description") or "",
+                    "parameters": fn.get("parameters") or {"type": "object", "properties": {}},
+                    "strict": False,
+                })
+        payload: Dict[str, Any] = {
+            "model": model_id,
+            "store": False,
+            "stream": True,
+            "input": items,
+            "tools": tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "reasoning": {"effort": "low", "summary": "auto"},
+        }
+        if instructions:
+            payload["instructions"] = "\n\n".join(instructions)
+        return payload
+
+    @staticmethod
+    def _normalize_codex_usage(usage: Any) -> Dict[str, Any]:
+        if not isinstance(usage, dict):
+            return {}
+        prompt = usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0
+        completion = usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0
+        return {**usage, "prompt_tokens": prompt, "completion_tokens": completion,
+                "total_tokens": usage.get("total_tokens") or prompt + completion}
+
+    def _parse_codex_sse(self, body: str) -> Dict[str, Any]:
+        text_parts: List[str] = []
+        final_text = ""
+        usage: Dict[str, Any] = {}
+        calls: Dict[str, Dict[str, Any]] = {}
+        argument_buffers: Dict[str, str] = {}
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+            raw = line[5:].strip()
+            if not raw or raw == "[DONE]":
+                continue
+            try:
+                event = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(event.get("error"), dict) and event["error"].get("message"):
+                raise Exception(str(event["error"]["message"]))
+            event_type = event.get("type")
+            if event_type == "response.output_text.delta":
+                text_parts.append(str(event.get("delta") or ""))
+            elif event_type == "response.output_text.done":
+                final_text = str(event.get("text") or "")
+            item = event.get("item") or event.get("output_item")
+            key = str(event.get("item_id") or (item.get("id") if isinstance(item, dict) else "") or f"idx:{event.get('output_index', '')}")
+            if event_type == "response.function_call_arguments.delta":
+                argument_buffers[key] = argument_buffers.get(key, "") + str(event.get("delta") or "")
+            if isinstance(item, dict) and item.get("type") == "function_call" and item.get("name"):
+                calls[key] = {
+                    "id": str(item.get("call_id") or item.get("id") or key),
+                    "type": "function",
+                    "function": {"name": str(item["name"]), "arguments": str(item.get("arguments") or argument_buffers.get(key, "{}"))},
+                }
+            response = event.get("response")
+            if isinstance(response, dict):
+                if isinstance(response.get("usage"), dict):
+                    usage = self._normalize_codex_usage(response["usage"])
+                for output in response.get("output") or []:
+                    if not isinstance(output, dict):
+                        continue
+                    if output.get("type") == "function_call" and output.get("name"):
+                        output_key = str(output.get("id") or output.get("call_id") or len(calls))
+                        calls[output_key] = {
+                            "id": str(output.get("call_id") or output.get("id") or output_key),
+                            "type": "function",
+                            "function": {"name": str(output["name"]), "arguments": str(output.get("arguments") or "{}")},
+                        }
+                    elif output.get("type") == "message":
+                        chunks = [str(part.get("text") or "") for part in output.get("content") or [] if isinstance(part, dict)]
+                        if chunks:
+                            final_text = "".join(chunks)
+        for key, arguments in argument_buffers.items():
+            if key in calls and arguments:
+                calls[key]["function"]["arguments"] = arguments
+        tool_calls = list(calls.values())
+        message: Dict[str, Any] = {"role": "assistant", "content": final_text or "".join(text_parts)}
+        if tool_calls:
+            message["tool_calls"] = tool_calls
+        return {"choices": [{"message": message, "finish_reason": "tool_calls" if tool_calls else "stop"}], "usage": usage}
+
+    async def _post_codex_request(
+        self, client: httpx.AsyncClient, url: str, headers: Dict[str, str], payload: Dict[str, Any]
+    ) -> _ProviderResponse:
+        response = await client.post(url, headers=headers, json=payload)
+        if response.status_code != 200:
+            return _ProviderResponse(response.status_code, response.text, {})
+        data = self._parse_codex_sse(response.text)
+        return _ProviderResponse(response.status_code, response.text, data)
+
     # ── Agent loop ─────────────────────────────────────────────────
 
     async def chat(
@@ -1385,8 +1302,8 @@ class CopilotService:
         without ever seeing the password — these fields are auto-injected at
         dispatch time. Never persisted; lives only for this chat() call.
         """
-        if not self._github_token:
-            return CopilotResponse(success=False, error="Not signed in. Click 'Sign in with GitHub' first.")
+        if not self.is_configured:
+            return CopilotResponse(success=False, error="OpenAI Codex is not connected.")
 
         session_lock = await self._get_session_lock(session_id)
         if session_lock.locked():
@@ -1413,17 +1330,11 @@ class CopilotService:
         cross_pod_enabled: bool = False,
         ssh_credentials: Optional[Dict[str, Any]] = None,
     ) -> CopilotResponse:
-        """
-        Run the Copilot agent loop:
-        1. Exchange GitHub token -> Copilot session token
-        2. Send user message + MCP tools to api.githubcopilot.com
-        3. If model calls a tool, execute it and feed result back
-        4. Repeat until model produces a final text response
-        """
-        if not self._github_token:
-            return CopilotResponse(success=False, error="Not signed in. Click 'Sign in with GitHub' first.")
+        """Run the OpenAI Codex agent loop with MCP tools."""
+        if not self.is_configured:
+            return CopilotResponse(success=False, error="OpenAI Codex is not connected.")
 
-        model_id = model or self._default_model
+        model_id = model or self._default_model or "gpt-5.6-sol"
         start = time.perf_counter()
         tool_calls_made: List[CopilotToolCall] = []
         total_usage: Dict[str, int] = {}
@@ -1437,13 +1348,9 @@ class CopilotService:
         print(f"[COPILOT] User: '{message[:120]}'")
         print(f"{'='*80}")
 
-        # Get Copilot session token (auto-refreshes if expired)
-        try:
-            copilot_token = await self._get_copilot_token()
-            print(f"[COPILOT] ✔ Token acquired (expires: {self._copilot_token_expires})")
-        except Exception as e:
-            print(f"[COPILOT] ✖ Token acquisition FAILED: {e}")
-            return CopilotResponse(success=False, error=str(e))
+        copilot_token = self._codex_access_token
+        if not copilot_token:
+            return CopilotResponse(success=False, error="OpenAI Codex is not connected.")
 
         # Get or create session history. Always refresh the system prompt so
         # any per-request policy changes take effect on the next user turn
@@ -1466,9 +1373,7 @@ class CopilotService:
         mcp = get_mcp_server()
         # Bound the agent loop. Configurable via
         # COPILOT_AGENT_MAX_ITERATIONS / COPILOT_AGENT_WALL_CLOCK_SECONDS.
-        # Generous defaults suit multi-step schema exploration where
-        # Claude occasionally returns empty tool_calls and burns a few extra
-        # round-trips before emitting a real call.
+        # Generous defaults suit multi-step schema exploration.
         from app.config.settings import settings as _agent_settings
         max_iterations = max(1, int(_agent_settings.copilot_agent_max_iterations))
         _budget_seconds = float(_agent_settings.copilot_agent_wall_clock_seconds)
@@ -1480,8 +1385,9 @@ class CopilotService:
         headers = {
             "Authorization": f"Bearer {copilot_token}",
             "Content-Type": "application/json",
-            **COPILOT_HEADERS,
+            "Accept": "text/event-stream",
         }
+        chat_url = CODEX_RESPONSES_URL
 
         logger.info(f"Copilot chat: model={model_id}")
 
@@ -1500,30 +1406,13 @@ class CopilotService:
                             model=model_id,
                             total_time_ms=round((time.perf_counter() - start) * 1000, 1),
                         )
-                    # Refresh token if expired mid-conversation
-                    if self._copilot_token_expires < int(time.time()) + 30:
-                        copilot_token = await self._get_copilot_token()
-                        headers["Authorization"] = f"Bearer {copilot_token}"
-
-                    payload: Dict[str, Any] = {
-                        "model": model_id,
-                        "messages": history,
-                        "temperature": 0.1,
-                        "max_tokens": 4096,
-                    }
-                    if tool_defs:
-                        payload["tools"] = tool_defs
-                        payload["tool_choice"] = "auto"
+                    payload: Dict[str, Any] = self._build_codex_payload(model_id, history, tool_defs)
 
                     print(f"\n[COPILOT] ── Iteration {iteration + 1}/{max_iterations} ──")
                     print(f"[COPILOT] → Sending {len(history)} messages to LLM...")
                     llm_start = time.perf_counter()
 
-                    resp = await client.post(
-                        f"{COPILOT_API_URL}/chat/completions",
-                        headers=headers,
-                        json=payload,
-                    )
+                    resp = await self._post_codex_request(client, chat_url, headers, payload)
                     llm_elapsed = (time.perf_counter() - llm_start) * 1000
 
                     if resp.status_code != 200:
@@ -1745,10 +1634,7 @@ class CopilotService:
 
                     if not is_final and iteration < max_iterations - 2:
                         # Sharper nudge when the model promised tool_calls but
-                        # returned an empty tool_calls array (a known Claude
-                        # quirk via the Copilot proxy). Without this, the
-                        # loop wastes 3-4 LLM round-trips on preface text
-                        # like "Let me find ..." before a real tool call.
+                        # returned an empty tool_calls array.
                         if finish_reason == "tool_calls":
                             nudge = (
                                 "You indicated a tool call but the tool_calls array was empty. "
@@ -1905,8 +1791,8 @@ class CopilotService:
         def _sse(event: str, data: dict) -> str:
             return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
-        if not self._github_token:
-            yield _sse("error", {"error": "Not signed in. Click 'Sign in with GitHub' first."})
+        if not self.is_configured:
+            yield _sse("error", {"error": "OpenAI Codex is not connected."})
             yield _sse("done", {"success": False, "error": "not_signed_in"})
             return
 
@@ -1942,18 +1828,21 @@ class CopilotService:
     ):
         """Inner implementation of chat_stream; runs under per-session lock."""
 
-        model_id = model or self._default_model
+        model_id = model or self._default_model or "gpt-5.6-sol"
         start = time.perf_counter()
         tool_calls_made: List[CopilotToolCall] = []
         total_usage: Dict[str, int] = {}
         active_db_name: str = ""
         done_sent = False  # Phase A1: track whether terminal event was emitted
 
-        try:
-            copilot_token = await self._get_copilot_token()
-        except Exception as e:
-            yield _sse("error", {"error": str(e)})
-            yield _sse("done", {"success": False, "error": str(e)})
+        yield _sse("thinking", {"text": "Preparing OpenAI Codex request and database context..."})
+        await asyncio.sleep(0)
+
+        copilot_token = self._codex_access_token
+        if not copilot_token:
+            error = "OpenAI Codex is not connected."
+            yield _sse("error", {"error": error})
+            yield _sse("done", {"success": False, "error": error})
             return
 
         ssh_creds_present = bool(ssh_credentials and ssh_credentials.get("ssh_host"))
@@ -1982,8 +1871,9 @@ class CopilotService:
         headers = {
             "Authorization": f"Bearer {copilot_token}",
             "Content-Type": "application/json",
-            **COPILOT_HEADERS,
+            "Accept": "text/event-stream",
         }
+        chat_url = CODEX_RESPONSES_URL
 
         try:
             async with httpx.AsyncClient(timeout=180.0, verify=_SSL_CTX) as client:
@@ -1993,22 +1883,15 @@ class CopilotService:
                         yield _sse("done", {"success": False, "error": "wall_clock_exceeded"})
                         done_sent = True
                         return
-                    if self._copilot_token_expires < int(time.time()) + 30:
-                        copilot_token = await self._get_copilot_token()
-                        headers["Authorization"] = f"Bearer {copilot_token}"
+                    payload = self._build_codex_payload(model_id, history, tool_defs)
 
-                    payload = {
-                        "model": model_id,
-                        "messages": history,
-                        "tools": tool_defs,
-                        "tool_choice": "auto",
-                    }
+                    if iteration == 0:
+                        yield _sse("thinking", {"text": "Asking OpenAI Codex to choose the right database tools..."})
+                    else:
+                        yield _sse("thinking", {"text": "Sending tool results back to OpenAI Codex for the next decision..."})
+                    await asyncio.sleep(0)
 
-                    resp = await client.post(
-                        "https://api.githubcopilot.com/chat/completions",
-                        headers=headers,
-                        json=payload,
-                    )
+                    resp = await self._post_codex_request(client, chat_url, headers, payload)
 
                     if resp.status_code != 200:
                         yield _sse("error", {"error": f"API error {resp.status_code}"})
@@ -2084,6 +1967,7 @@ class CopilotService:
                                 "database": active_db_name or None,
                                 "index": len(tool_calls_made),
                             })
+                            await asyncio.sleep(0)
 
                             tool_start_t = time.perf_counter()
                             try:
@@ -2135,10 +2019,12 @@ class CopilotService:
                                 "tool_name": tool_name,
                                 "success": tool_call.success,
                                 "error": tool_call.error,
+                                "result": _compact_tool_result_for_sse(tool_call.result),
                                 "execution_time_ms": tool_call.execution_time_ms,
                                 "database": tool_call.database,
                                 "index": len(tool_calls_made) - 1,
                             })
+                            await asyncio.sleep(0)
 
                             result_content = (
                                 json.dumps(tool_call.result)
@@ -2281,25 +2167,23 @@ class CopilotService:
                 done_sent = True
 
         except httpx.TimeoutException:
-            yield _sse("error", {"error": "Request to GitHub Copilot API timed out. Check VPN/network connectivity to api.githubcopilot.com."})
+            yield _sse("error", {"error": "Request to the OpenAI Codex service timed out. Check network connectivity."})
         except httpx.ConnectError as e:
             err_str = str(e)
             logger.error(f"Copilot stream ConnectError: {err_str}", exc_info=True)
             if not err_str:
-                err_str = "Cannot connect to api.githubcopilot.com (TLS/SSL handshake failed). Check VPN/network connectivity."
+                err_str = "Cannot connect to the OpenAI Codex service (TLS/SSL handshake failed)."
             yield _sse("error", {"error": err_str})
         except Exception as e:
             err_str = str(e)
             logger.error(f"Copilot stream error: {type(e).__name__}: {err_str}", exc_info=True)
             # Provide user-friendly error for common network issues
             if "getaddrinfo" in err_str or "Name or service not known" in err_str:
-                err_str = ("Cannot resolve GitHub API hostname (DNS failure). "
-                           "Check VPN/proxy — api.github.com and api.githubcopilot.com must be reachable.")
+                err_str = "Cannot resolve the OpenAI Codex service hostname (DNS failure)."
             elif "timed out" in err_str.lower() or "timeout" in err_str.lower():
-                err_str = ("Connection to GitHub API timed out. "
-                           "Check VPN/network connectivity.")
+                err_str = "Connection to the OpenAI Codex service timed out."
             elif not err_str:
-                err_str = f"Network error ({type(e).__name__}). Check VPN/network connectivity to GitHub."
+                err_str = f"OpenAI Codex network error ({type(e).__name__})."
             yield _sse("error", {"error": err_str})
         finally:
             # Phase A1: guarantee a terminal SSE event so the UI EventSource

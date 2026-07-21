@@ -300,15 +300,11 @@ export class ApiService implements OnDestroy {
   }
 
   // ====================================================================
-  // Execution Log Endpoints (MCP Agent / GitHub Copilot)
+  // Execution Log Endpoints (OpenAI Codex agent)
   // ====================================================================
 
-  getCopilotExecutionLogs(limit: number = 1000, githubUsername: string = ''): Observable<any> {
-    let url = `${this.apiUrl}/api/copilot/logs?limit=${limit}`;
-    if (githubUsername) {
-      url += `&github_username=${encodeURIComponent(githubUsername)}`;
-    }
-    return this.http.get<any>(url).pipe(
+  getCopilotExecutionLogs(limit: number = 1000): Observable<any> {
+    return this.http.get<any>(`${this.apiUrl}/api/copilot/logs?limit=${limit}`).pipe(
       catchError(this.handleError)
     );
   }

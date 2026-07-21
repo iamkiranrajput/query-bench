@@ -1,0 +1,10 @@
+[
+  "Meet Query Bench, an AI-powered SQL assistant. Business users can ask questions in plain English, without knowing table names, joins, or database syntax. Codex grounds every answer in the real database.",
+  "Users can add their own database connection from Settings. This demonstration uses PostgreSQL hosted on Supabase. Query Bench also supports MySQL, SQL Server, and Oracle, while storing connection profiles locally with encrypted passwords.",
+  "The Schema Explorer reads the live structure of the connected database. Users can inspect tables and columns, then upload business context such as metric definitions, business rules, data dictionaries, and example SQL.",
+  "The Dashboard makes activity observable. It summarizes query volume, success rate, response time, model usage, and searchable execution logs for every question.",
+  "Users sign in through OpenAI device authorization, so they never need to paste an API key. Query Bench then loads the models available to their account and lets them choose one.",
+  "Now we ask for monthly revenue, refunds, discounts, and net sales. Codex selects a function, the FastAPI backend executes it, and the result returns to Codex. This iterative loop searches the schema, generates SQL, validates it, and executes it. Server-Sent Events display every step live.",
+  "The final response includes the generated SQL and a clear business explanation. It identifies the strongest sales month, highlights unusual refunds, detects a potentially partial month, and cross-checks the monthly totals.",
+  "Query Bench combines Angular, FastAPI, SQLAlchemy, OpenAI OAuth, iterative function calling, and live SSE progress. Connect your database, add your context, and ask the question. Query Bench handles the investigation."
+]

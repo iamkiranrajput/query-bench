@@ -1,17 +1,26 @@
 # SQL Query Assistant
 
-**Natural-language SQL powered by GitHub Copilot Chat + Model Context Protocol (MCP)**
+**Natural-language SQL powered by OpenAI Codex OAuth + Model Context Protocol (MCP)**
 
-Ask questions about any relational database in plain English. A GitHub Copilot
-Chat model drives a set of **MCP tools** that explore the schema, build and
+Ask questions about any relational database in plain English. An OpenAI Codex
+model drives a set of **MCP tools** that explore the schema, build and
 validate SQL, and execute it safely — then explains the results.
 
-> **🏆 Agents League entry — grounded by Microsoft Foundry IQ.** Beyond raw
-> text-to-SQL, the agent first grounds business terms in a **Foundry IQ**
-> governed knowledge base (Azure AI Search) so every query uses *approved*
-> metric definitions and **cites its sources** — and it adapts to the database's
-> installed extensions (PostGIS spatial, pgvector semantic search).
-> See **[Microsoft Foundry IQ — Governed Knowledge Grounding](#microsoft-foundry-iq--governed-knowledge-grounding)**.
+## OpenAI Build Week setup
+
+1. Start the backend and Angular UI using the existing quick-start steps.
+2. Connect your database in **Settings**.
+3. Open **OpenAI Codex** and select the settings icon.
+4. Select **Sign in with OpenAI**, approve the device code in the browser, and
+   QueryBench will dynamically load the Codex models available to that account.
+5. Open **Database Context** and upload database context such as Markdown
+   schema notes, a CSV data dictionary, JSON/YAML business rules, or example
+   SQL. The file is scoped to the connected database and grounds the next turn.
+
+OpenAI OAuth credentials use encrypted-at-rest storage (Windows DPAPI, or AES-GCM
+with `COPILOT_TOKEN_ENC_KEY` on other platforms). Uploaded context is stored
+locally under `server/data/user_contexts/`, excluded from Git, and treated as
+guidance; live schema inspection and query results always take precedence.
 
 ## Demo Video
 
@@ -20,8 +29,8 @@ validate SQL, and execute it safely — then explains the results.
 
 [Watch the 4-minute QueryBench hackathon demo](https://youtu.be/bP9VPO2PLC4)
 
-This walkthrough shows the agent experience end to end: governed business
-context from Microsoft Foundry IQ, MCP tool calls, PostGIS/pgvector-aware SQL,
+This walkthrough shows the agent experience end to end: database context files,
+MCP tool calls, PostGIS/pgvector-aware SQL,
 validation, execution, and the trust panel that explains why the answer can be
 trusted.
 
@@ -47,7 +56,7 @@ run it.
 ┌───────────────────────────────▼────────────────────────────────────┐
 │                       FastAPI Backend (Python)                       │
 │                                                                      │
-│   ┌──────────────── GitHub Copilot Agent Loop ──────────────────┐   │
+│   ┌───────────────── OpenAI Codex Agent Loop ──────────────────┐   │
 │   │  user question                                               │   │
 │   │      │                                                       │   │
 │   │      ▼   model picks tools ──►  MCP tool calls  ──┐          │   │
@@ -74,48 +83,12 @@ so IDE clients like VS Code, Cursor, or Claude Desktop can use it directly.
 
 ---
 
-## Microsoft Foundry IQ — Governed Knowledge Grounding
+## Database Context Files
 
-Text-to-SQL is everywhere; the hard part is making it **trustworthy for
-enterprises**. This project integrates **[Microsoft Foundry IQ](https://aka.ms/iq-series)**
-— Microsoft's managed, permission-aware knowledge layer over enterprise data —
-as the grounding step *before* SQL is written.
-
-- **Structured half:** a local **FAISS** index answers *which table/column*.
-- **Unstructured half:** **Foundry IQ** (Azure AI Search) answers *what a
-  business term actually means* — data-dictionary entries, metric definitions,
-  glossary terms, and PostGIS/pgvector conventions — and returns **citations**.
-
-The agent fuses both: it grounds ambiguous terms (e.g. *"active customer"*,
-*"net revenue"*, *"downtown"*) in their **approved** definitions, then writes SQL
-that matches — and tells you which governed source it used. That is the
-*"beyond traditional RAG"* enterprise-intelligence story Foundry IQ is built for.
-
-```mermaid
-flowchart TD
-    U["User question — e.g. 'net revenue from active customers near downtown'"] --> A
-    subgraph Agent["GitHub Copilot agent loop (MCP tools)"]
-      A["Model reasons and picks tools"]
-    end
-    A -->|business terms| F["retrieve_business_context"]
-    A -->|schema| S["search_tables / search_columns"]
-    A -->|capabilities| E["detect_extensions"]
-    F --> KB["Microsoft Foundry IQ knowledge base"]
-    KB --> AIS[("Azure AI Search — governed knowledge + citations")]
-    S --> FA[("FAISS schema index")]
-    A -->|grounded, cited SQL| X["execute_sql"]
-    E -. "PostGIS / pgvector" .-> X
-    X --> DB[("PostgreSQL + PostGIS + pgvector")]
-    X --> ANS["Answer + SQL + rows + Foundry IQ citations"]
-```
-
-**Why it matters:** ask a question with an ambiguous business term and the agent
-retrieves the **governed definition from Foundry IQ, cites it, and generates SQL
-that matches** — where a naive agent would guess and get it subtly wrong.
-
-**Graceful by design:** Foundry IQ is optional. Without Azure credentials the
-`retrieve_business_context` tool returns `configured: false` and the agent
-continues with the schema tools — the app runs identically either way.
+Upload Markdown, text, JSON, YAML, CSV, or SQL files containing schema notes,
+business rules, metric definitions, data dictionaries, and example queries.
+Files are stored locally, scoped to the selected database, and automatically
+included in Codex conversations. Live schema inspection remains authoritative.
 
 ---
 
@@ -125,7 +98,6 @@ The agent has access to tools across a few categories:
 
 | Category | Tools |
 |----------|-------|
-| **Knowledge grounding** | `retrieve_business_context` (Microsoft Foundry IQ) |
 | **Discovery** | `search_tables`, `search_columns`, `introspect_schema`, `preview_data`, `sample_column_values` |
 | **Relationships** | `check_relationships`, `discover_join_paths` |
 | **Advanced SQL** | `detect_extensions`, `semantic_data_search` (pgvector) |
@@ -143,7 +115,7 @@ detection, keyword blocking, single-statement enforcement) before it runs.
 - **Python 3.10+** (3.13 supported)
 - **Node.js 18+** and npm (Angular 17 requires ≥ 18)
 - A reachable **SQL database** (PostgreSQL, MySQL, SQL Server, or Oracle)
-- A **GitHub account with Copilot access** (authenticated at runtime via device code)
+- An **OpenAI account with Codex access** (authenticated at runtime via OAuth device code)
 
 ### Backend Setup
 ```bash
@@ -165,7 +137,7 @@ cp .env.example .env
 # Start server
 python main.py
 ```
-Backend: `http://localhost:8090` · API docs: `http://localhost:8090/api/docs`
+Backend: `http://localhost:2222` · API docs: `http://localhost:2222/api/docs`
 
 ### Frontend Setup
 ```bash
@@ -173,53 +145,26 @@ cd ui
 npm install
 npm start
 ```
-Frontend: `http://localhost:4280`
+Frontend: `http://localhost:1111`
 
 > Override ports via `PORT=` in `server/.env` and the `--port` flag in the
 > `start` script of `ui/package.json`.
 
 ### Usage
-1. Open `http://localhost:4280`.
+1. Open `http://localhost:1111`.
 2. Go to **Settings → Database Connections** and connect to your database.
-3. Open **Copilot Chat**, sign in to GitHub Copilot (device-code prompt), and
+3. Open **OpenAI Codex**, sign in with your OpenAI account (device-code prompt), and
    ask questions in natural language.
 4. Use **Schema Explorer**, **Dashboard**, and **Analytics** to browse the
    schema and review query history.
 
 ---
 
-## Microsoft Foundry IQ — Setup (optional but recommended)
-
-Grounding is **optional**: without it the agent runs exactly as before. With it,
-the agent grounds business terms in governed knowledge and cites sources.
-
-1. **Provision Azure resources** with the Microsoft IQ Series template
-   (Azure AI Search + Azure OpenAI + a Foundry project):
-   <https://aka.ms/iq-series/deploytoazure>
-2. **Configure** `server/.env` (secrets come from the environment — never commit them):
-   ```bash
-   AZURE_SEARCH_ENDPOINT=https://<service>.search.windows.net
-   AZURE_SEARCH_API_KEY=<admin-key>
-   FOUNDRY_SEARCH_INDEX=querybench-knowledge
-   # Optional — enables Foundry IQ knowledge-base agentic retrieval:
-   FOUNDRY_KNOWLEDGE_BASE_NAME=<your-knowledge-base>
-   ```
-3. **Ingest the governed knowledge** (business glossary + spatial/vector
-   conventions in `server/data/foundry_knowledge/knowledge.json`):
-   ```bash
-   cd server
-   python scripts/ingest_knowledge.py
-   ```
-
-When configured, `retrieve_business_context` answers from your knowledge base;
-when not, it returns `configured: false` and the agent proceeds schema-only.
-
 ## Demo database (PostGIS + pgvector)
 
 A ready-to-run demo database showcases the spatial + semantic features. It seeds
 a sizeable geospatial retail dataset — **100 stores, 5,000 customers, 30,000
-orders, 24 products** (all SRID 4326) — that pairs with the governed Foundry IQ
-knowledge.
+orders, 24 products** (all SRID 4326).
 
 **Option A — Docker (self-contained):**
 
@@ -259,13 +204,12 @@ python demo/seed_embeddings.py
 > view also renders plain `latitude`/`longitude` columns, so spatial results
 > still plot even without PostGIS.
 
-Once connected, try the grounded demos:
+Once connected, try these demos:
 
-- *"What is our net revenue from active customers?"* → grounds **"active
-  customer"** and **"net revenue"** in Foundry IQ, then writes SQL matching the
-  governed definition (completed orders, last 90 days, amount − discount − refund).
-- *"Which stores are within 5 km of downtown?"* → grounds the **downtown**
-  reference point + spatial conventions, then emits correct
+- *"What is our net revenue from active customers?"* → uses definitions from
+  your uploaded database context, then verifies them against the live schema.
+- *"Which stores are within 5 km of downtown?"* → uses uploaded spatial
+  conventions and emits correct
   `ST_DWithin(geom::geography, …)` PostGIS SQL.
 - *"Find products similar to 'warm clothing for winter'"* → uses
   `semantic_data_search` over the pgvector `embedding` column.
@@ -274,12 +218,10 @@ Once connected, try the grounded demos:
 
 ## Features
 
-- Natural-language → SQL via a GitHub Copilot Chat **agent loop** over MCP tools
-- **Microsoft Foundry IQ grounding** — governed business definitions with
-  **citations**, so SQL is explainable and auditable (graceful when unconfigured)
+- Natural-language → SQL via an OpenAI Codex **agent loop** over MCP tools
+- **Database context files** — local schema notes, rules, definitions, and example SQL
 - **Extension-aware** — detects PostGIS / pgvector and adapts the SQL it writes
-- **PostGIS spatial** queries (distance / "near" / containment) grounded by
-  governed spatial conventions
+- **PostGIS spatial** queries (distance / "near" / containment)
 - **pgvector semantic search** over embedding columns (`semantic_data_search`)
 - Works with **any** connected database through live schema introspection
 - Optional FAISS semantic search over schema (drop in `data/schema_hints.json`)
@@ -306,10 +248,9 @@ sql-query-assistant/
 │   │   ├── middleware/         # Auth + security headers
 │   │   ├── models/             # Request/response Pydantic schemas
 │   │   ├── routes/             # API endpoints (database, copilot, mcp, monitoring)
-│   │   ├── services/           # Core logic (database, copilot agent, Foundry IQ, logging)
-│   │   └── mcp_server/         # MCP server + tools (incl. retrieve_business_context)
-│   ├── scripts/                # ingest_knowledge.py — Foundry IQ knowledge ingest
-│   └── data/                   # Runtime stores + data/foundry_knowledge/ governed knowledge
+│   │   ├── services/           # Core logic (database, Codex agent, context files, logging)
+│   │   └── mcp_server/         # MCP server and SQL tools
+│   └── data/                   # Runtime stores and uploaded database context
 ├── demo/                       # Demo DB: PostGIS + pgvector (docker compose + seed)
 ├── ui/                         # Angular 17 frontend
 │   └── src/app/
@@ -348,7 +289,7 @@ Expose the MCP server to an IDE client over stdio:
 ```
 
 Or enable HTTP transport with `MCP_HTTP_ENABLED=true` in `server/.env` and
-connect to `http://localhost:8090/mcp`.
+connect to `http://localhost:2222/mcp`.
 
 ---
 
@@ -356,6 +297,5 @@ connect to `http://localhost:8090/mcp`.
 
 - **Backend**: FastAPI, SQLAlchemy, MCP Python SDK, (optional) FAISS + sentence-transformers
 - **Frontend**: Angular 17, Angular Material, Tailwind CSS
-- **AI**: GitHub Copilot Chat models via the Copilot API (agent LLM)
-- **Microsoft IQ**: Foundry IQ knowledge grounding via Azure AI Search (`azure-search-documents`)
+- **AI**: OpenAI Codex models through account OAuth (agent LLM; no API key required)
 - **Databases**: PostgreSQL (incl. PostGIS + pgvector), MySQL, SQL Server, Oracle

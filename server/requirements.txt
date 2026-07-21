@@ -10,7 +10,7 @@ SQLAlchemy==2.0.36
 psycopg2-binary==2.9.11
 pymysql==1.1.2
 
-# --- HTTP client (GitHub Copilot OAuth + REST plumbing) ----------------------
+# --- HTTP client (OpenAI Codex OAuth + REST plumbing) ------------------------
 httpx==0.27.2
 requests==2.31.0
 certifi>=2024.7.4
@@ -33,18 +33,8 @@ sentence-transformers==5.4.1
 # --- MCP (Model Context Protocol) for tool-based LLM agents ------------------
 mcp==1.27.0
 
-# --- AES-GCM encryption for the persisted GitHub Copilot token --------------
+# --- AES-GCM encryption for the persisted OpenAI Codex token ----------------
 cryptography==43.0.3
-
-# --- Optional: Microsoft Foundry IQ knowledge grounding (Azure AI Search) ----
-# Powers the `retrieve_business_context` MCP tool, which grounds the SQL agent
-# in a Foundry IQ knowledge base (governed business glossary, metric and
-# PostGIS conventions). OPTIONAL — the tool and the whole agent degrade
-# gracefully when these are absent. Version pinned to match the
-# microsoft/iq-series Foundry IQ cookbooks (KnowledgeBaseRetrievalClient).
-azure-search-documents==12.1.0b1
-azure-core>=1.37.0
-azure-identity>=1.19.0
 
 # --- Optional: pgvector binding for in-database semantic row search ----------
 # Powers the `semantic_data_search` tool (embeds with the same all-MiniLM-L6-v2

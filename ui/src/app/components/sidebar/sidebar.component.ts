@@ -23,11 +23,11 @@ export class SidebarComponent {
   collapsed: boolean = false;
 
   navigationItems = [
-    { id: 'mcp-agent' as ViewType, label: 'Copilot Chat', icon: 'smart_toy', section: 'main' },
+    { id: 'mcp-agent' as ViewType, label: 'OpenAI Codex', icon: 'smart_toy', section: 'main' },
     { id: 'dashboard' as ViewType, label: 'Dashboard', icon: 'dashboard', section: 'main' },
     { id: 'schema' as ViewType, label: 'Schema Explorer', icon: 'account_tree', section: 'main' },
     { id: 'analytics' as ViewType, label: 'Analytics', icon: 'insights', section: 'tools' },
-    { id: 'knowledge' as ViewType, label: 'Governed Knowledge', icon: 'menu_book', section: 'tools' },
+    { id: 'knowledge' as ViewType, label: 'Database Context', icon: 'description', section: 'tools' },
     { id: 'configuration' as ViewType, label: 'Settings', icon: 'settings', section: 'tools' },
   ];
 

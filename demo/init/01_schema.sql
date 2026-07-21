@@ -1,6 +1,5 @@
--- Demo database schema for Query Bench (Agents League / Foundry IQ demo).
--- Showcases PostGIS spatial queries + pgvector semantic search grounded by
--- Microsoft Foundry IQ governed knowledge.
+-- Demo database schema for Query Bench.
+-- Showcases PostGIS spatial queries and pgvector semantic search.
 --
 -- Runs automatically on first container start via docker-entrypoint-initdb.d.
 

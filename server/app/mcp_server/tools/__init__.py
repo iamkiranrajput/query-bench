@@ -22,7 +22,6 @@ from .get_connection_profile import get_connection_profile
 from .analyze_connection_performance import analyze_connection_performance
 from .validate_server_compatibility import validate_server_compatibility
 from .switch_database import switch_database, list_available_databases
-from .retrieve_business_context import retrieve_business_context
 from .detect_extensions import detect_extensions
 from .semantic_data_search import semantic_data_search
 
@@ -45,7 +44,6 @@ __all__ = [
     "validate_server_compatibility",
     "switch_database",
     "list_available_databases",
-    "retrieve_business_context",
     "detect_extensions",
     "semantic_data_search",
 ]

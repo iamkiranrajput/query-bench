@@ -135,9 +135,9 @@
         </button>
         <mat-icon class="header-icon">smart_toy</mat-icon>
         <div>
-          <h3>Copilot Chat</h3>
+          <h3>OpenAI Codex</h3>
           <span class="header-sub">
-            GitHub Copilot &mdash; {{ selectedModel }}
+            OpenAI &mdash; {{ selectedModel }}
           </span>
         </div>
       </div>
@@ -146,7 +146,7 @@
         <button
           class="btn btn-icon"
           (click)="openConfigDialog()"
-          [matTooltip]="copilotConfigured ? 'Copilot configured ✓' : 'Configure GitHub token'"
+          [matTooltip]="copilotConfigured ? 'OpenAI Codex connected ✓' : 'Sign in with OpenAI'"
           [class.configured]="copilotConfigured"
         >
           <mat-icon>{{ copilotConfigured ? 'check_circle' : 'settings' }}</mat-icon>
@@ -164,15 +164,15 @@
       <!-- Empty state -->
       <div *ngIf="!messages.length && !isLoading" class="empty-state">
         <mat-icon class="empty-icon">smart_toy</mat-icon>
-        <h4>GitHub Copilot Chat</h4>
+        <h4>OpenAI Codex SQL Agent</h4>
         <p>
-          Chat with GitHub Copilot models ({{ selectedModel }}).
+          Chat with OpenAI Codex models ({{ selectedModel }}).
           The model has access to MCP tools to discover tables, generate SQL,
-          and execute queries &mdash; just like Copilot in VS Code.
+          and execute queries using MCP tools.
         </p>
         <p *ngIf="!copilotConfigured" class="config-hint">
           <mat-icon>info</mat-icon>
-          Click the <strong>⚙</strong> icon to sign in with GitHub and connect Copilot.
+          Click the <strong>⚙</strong> icon to sign in securely with OpenAI Codex.
         </p>
         <div class="quick-actions">
           <button class="quick-btn" (click)="sendQuickAction('List all tables in the database')">
@@ -272,9 +272,6 @@
                       </mat-icon>
                       <span class="step-name">{{ step.tool_name }}</span>
                       <span class="step-summary">{{ toolStepSummary(step) }}</span>
-                      <span *ngIf="isFoundryGrounding(step) && foundryConfigured(step)" class="foundry-badge">
-                        <mat-icon class="foundry-badge-icon">verified</mat-icon> Foundry IQ
-                      </span>
                       <mat-icon class="step-expand">
                         {{ isStepExpanded(msg.id, i) ? 'expand_less' : 'expand_more' }}
                       </mat-icon>
@@ -292,17 +289,6 @@
                         </span>
                         <pre *ngIf="step.error" class="detail-json error-json">{{ step.error }}</pre>
                         <pre *ngIf="!step.error" class="detail-json">{{ formatJson(step.result) }}</pre>
-                      </div>
-                      <div *ngIf="isFoundryGrounding(step) && foundryCitations(step).length" class="step-detail-section foundry-citations">
-                        <span class="detail-label foundry-label">
-                          <mat-icon class="foundry-badge-icon">verified</mat-icon>
-                          Grounded by Microsoft Foundry IQ — {{ foundryCitations(step).length }} governed source{{ foundryCitations(step).length !== 1 ? 's' : '' }}
-                        </span>
-                        <div class="citation" *ngFor="let c of foundryCitations(step)">
-                          <div class="citation-title">{{ c.title || 'knowledge passage' }}</div>
-                          <div *ngIf="c.source" class="citation-source">{{ c.source }}</div>
-                          <div *ngIf="c.snippet" class="citation-snippet">{{ c.snippet }}</div>
-                        </div>
                       </div>
                     </div>
                   </div>
@@ -360,47 +346,6 @@
             <!-- Text response -->
             <div *ngIf="msg.content" class="msg-content agent-content" [innerHTML]="renderMarkdown(msg.content)"></div>
 
-            <!-- Verifiable Trust Layer panel -->
-            <div *ngIf="hasTrust(msg)" class="trust-panel" [class]="'trust-' + trustLabel(msg)">
-              <div class="trust-head">
-                <mat-icon class="trust-icon">{{ trustIcon(msg) }}</mat-icon>
-                <span class="trust-headline">{{ trustHeadline(msg) }}</span>
-                <span class="trust-spacer"></span>
-                <span *ngIf="msg.trustScore != null" class="trust-score">Trust {{ msg.trustScore }}/100</span>
-                <span class="trust-count">{{ trustPassedCount(msg) }}/{{ trustChecks(msg).length }} checks</span>
-              </div>
-
-              <!-- Dual-path cross-check -->
-              <div *ngIf="trustVerification(msg) as v" class="trust-verify"
-                   [class.agree]="v.agreed" [class.disagree]="!v.agreed">
-                <mat-icon class="trust-verify-icon">{{ v.agreed ? 'fact_check' : 'report_problem' }}</mat-icon>
-                <span class="trust-verify-text">
-                  <strong>{{ v.method_primary }}</strong> = {{ v.primary_value }}
-                  &nbsp;vs&nbsp;
-                  <strong>{{ v.method_check }}</strong> = {{ v.check_value }}
-                  <span class="trust-verdict">{{ v.agreed ? '→ agree' : '→ disagree' }} (Δ {{ v.delta }})</span>
-                </span>
-              </div>
-
-              <!-- Evidence checklist -->
-              <div class="trust-checks">
-                <div class="trust-check" *ngFor="let c of trustChecks(msg)"
-                     [class.passed]="c.passed" [class.failed]="!c.passed">
-                  <mat-icon class="trust-check-icon">{{ c.passed ? 'check_circle' : 'cancel' }}</mat-icon>
-                  <span class="trust-check-name">{{ c.name }}</span>
-                  <span class="trust-check-detail">{{ c.detail }}</span>
-                </div>
-              </div>
-
-              <!-- Governed provenance -->
-              <div *ngIf="trustGroundedSources(msg).length" class="trust-provenance">
-                <mat-icon class="trust-prov-icon">verified</mat-icon>
-                <span>Governed by Microsoft Foundry IQ:
-                  <span class="trust-prov-src" *ngFor="let s of trustGroundedSources(msg); let last = last">{{ s.title }}{{ !last ? ', ' : '' }}</span>
-                </span>
-              </div>
-            </div>
-
             <!-- Meta information bar (tokens, time, cost) -->
             <div *ngIf="msg.totalTimeMs || msg.tokenUsage" class="meta-info-bar">
               <span *ngIf="msg.totalTimeMs" class="meta-item" matTooltip="Total response time">
@@ -426,7 +371,7 @@
             </div>
 
             <!-- In-progress indicator -->
-            <div *ngIf="!msg.content && !msg.error && !msg.toolSteps?.length && isLoading && msg === getLastAssistantMessage()" class="thinking-indicator inline-loading">
+            <div *ngIf="!msg.content && !msg.error && !msg._thinkingText && !msg.toolSteps?.length && isLoading && msg === getLastAssistantMessage()" class="thinking-indicator inline-loading">
               <mat-spinner diameter="16"></mat-spinner>
               <span>{{ selectedModel }} is working...</span>
             </div>
@@ -484,10 +429,13 @@
                 <ng-container *ngIf="group.expanded">
                   <div *ngFor="let m of group.models"
                        class="model-option" [class.selected]="m.id === selectedModel"
-                       (click)="selectedModel = m.id">
+                       [class.disabled]="m.supported_in_api === false"
+                       [matTooltip]="m.supported_in_api === false ? 'Listed by Codex but unavailable for API requests' : ''"
+                       (click)="selectModel(m)">
                     <mat-icon class="model-radio">{{ m.id === selectedModel ? 'radio_button_checked' : 'radio_button_unchecked' }}</mat-icon>
                     <span class="model-name">{{ m.name }}</span>
                     <span *ngIf="m.id === selectedModel" class="model-active-badge">Active</span>
+                    <span *ngIf="m.supported_in_api === false" class="model-unavailable-badge">Unavailable</span>
                   </div>
                 </ng-container>
               </ng-container>
@@ -504,7 +452,7 @@
           </button>
           <button mat-menu-item (click)="openConfigDialog()">
             <mat-icon>{{ copilotConfigured ? 'check_circle' : 'key' }}</mat-icon>
-            <span>{{ copilotConfigured ? 'Token Connected' : 'Connect GitHub' }}</span>
+            <span>{{ copilotConfigured ? 'OpenAI Connected' : 'Connect OpenAI' }}</span>
           </button>
           <mat-divider></mat-divider>
           <button mat-menu-item (click)="clearChat()"
@@ -541,21 +489,20 @@
     </div>
   </div>
 
-  <!-- Copilot Config Dialog (overlay) -->
+  <!-- OpenAI Codex Config Dialog (overlay) -->
   <div *ngIf="showConfigDialog" class="config-overlay" (click)="closeConfigDialog()">
     <div class="config-dialog" (click)="$event.stopPropagation()">
       <div class="config-header">
-        <h4><mat-icon>key</mat-icon> Connect GitHub Copilot</h4>
+        <h4><mat-icon>key</mat-icon> Connect OpenAI Codex</h4>
         <button class="btn btn-icon" (click)="closeConfigDialog()">
           <mat-icon>close</mat-icon>
         </button>
       </div>
       <div class="config-body">
-
         <!-- Device Flow: Active -->
         <div *ngIf="deviceFlowActive" class="device-flow-active">
           <p class="config-desc">
-            A browser window has been opened. Enter this code on GitHub:
+            A browser window has been opened. Enter this code on OpenAI:
           </p>
           <div class="device-code-display" (click)="copyDeviceCode()" matTooltip="Click to copy">
             <span class="device-code">{{ deviceFlowCode }}</span>
@@ -572,31 +519,23 @@
           </div>
         </div>
 
-        <!-- Device Flow: Not active -->
-        <div *ngIf="!deviceFlowActive">
-          <!-- Signed in: show profile -->
-          <div *ngIf="githubUser" class="github-profile">
-            <img [src]="githubUser.avatar_url" alt="avatar" class="github-avatar" />
-            <div class="github-profile-info">
-              <span class="github-name">{{ githubUser.name || githubUser.username }}</span>
-              <span class="github-username">{{'@' + githubUser.username}}</span>
+        <div *ngIf="!deviceFlowActive" class="openai-config">
+          <p class="config-desc">
+            Sign in with your OpenAI account using Codex device authorization. No API key is required.
+          </p>
+          <div *ngIf="hasOpenAIToken" class="openai-profile">
+            <mat-icon>account_circle</mat-icon>
+            <div class="openai-profile-info">
+              <span class="openai-name">{{ codexDisplayName || 'OpenAI user' }}</span>
+              <span class="openai-email">{{ codexEmail }}</span>
             </div>
-            <button class="btn btn-danger-outline" (click)="signOutGitHub()">
-              <mat-icon>logout</mat-icon>
-              Sign out
-            </button>
           </div>
-          <!-- Not signed in: show sign in button -->
-          <div *ngIf="!githubUser">
-            <p class="config-desc">
-              Sign in with your GitHub account to use Copilot models.
-              Your account must have an active GitHub Copilot subscription.
-            </p>
-            <button class="btn btn-github" (click)="startGitHubSignIn()">
-              <mat-icon>login</mat-icon>
-              Sign in with GitHub
-            </button>
-          </div>
+          <button *ngIf="!hasOpenAIToken" class="btn btn-openai" (click)="startCodexSignIn()">
+            <mat-icon>login</mat-icon> Sign in with OpenAI
+          </button>
+          <button *ngIf="hasOpenAIToken" class="btn btn-danger-outline" (click)="signOutOpenAI()">
+            <mat-icon>logout</mat-icon> Sign out of OpenAI
+          </button>
         </div>
       </div>
       <div class="config-footer">

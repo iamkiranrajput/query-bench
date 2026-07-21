@@ -1,7 +1,7 @@
 """
 Generic MCP/Copilot resource builders.
 
-These builders expose lightweight, generic context that the GitHub Copilot
+These builders expose lightweight, generic context that the OpenAI Codex
 agent and external MCP clients can consume to understand the connected
 database. Any database-specific curated knowledge has been removed -- the
 agent now leans on live introspection tools
@@ -28,7 +28,7 @@ def build_database_context(db_info: Optional[Dict[str, Any]] = None) -> Dict[str
     """
 
     return {
-        "server": "GitHub Copilot MCP SQL Assistant",
+        "server": "OpenAI Codex SQL Assistant",
         "connection": db_info or {"status": "session-managed (auto-injected)"},
         "description": (
             "This MCP server exposes a small toolbox for natural-language "

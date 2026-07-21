@@ -134,10 +134,15 @@ class CompressionMiddleware(BaseHTTPMiddleware):
         except asyncio.CancelledError:
             raise
         
-        # Skip if already encoded or streaming
+        # Never consume SSE responses. Starlette's BaseHTTPMiddleware may wrap
+        # StreamingResponse in a private streaming response class, so an
+        # isinstance check alone is not reliable. Iterating body_iterator here
+        # buffers the complete agent run and prevents live progress delivery.
+        content_type = (response.headers.get("content-type") or "").lower()
         if (
             response.headers.get("content-encoding") or
-            isinstance(response, StreamingResponse)
+            isinstance(response, StreamingResponse) or
+            content_type.startswith("text/event-stream")
         ):
             return response
         

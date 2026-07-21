@@ -26,10 +26,8 @@ the results.
 
 ## What you can do
 
-- **Ground business terms in governed knowledge** with \
-  ``retrieve_business_context`` (Microsoft Foundry IQ) before writing SQL, so \
-  metrics and domain concepts use their *approved* definitions and the query \
-  is explainable and auditable.
+- Use the database-specific context files included in this prompt for schema \
+  notes, business rules, metric definitions, data dictionaries, and example SQL.
 - Discover the schema (tables, columns, foreign keys) with \
   ``search_tables`` / ``search_columns`` / ``check_relationships`` / \
   ``introspect_schema``.
@@ -44,14 +42,8 @@ the results.
 
 ## Recommended workflow
 
-0. **Ground** -- if the question contains a business metric or domain term \
-   whose meaning is not obvious from column names (e.g. "active customer", \
-   "net revenue", "stores near downtown", "stale device"), call \
-   ``retrieve_business_context`` FIRST to fetch its governed definition from \
-   Microsoft Foundry IQ, then build the SQL to match that definition. If the \
-   tool returns ``configured: false`` (Foundry IQ not set up) or no results, \
-   skip grounding and proceed with the schema tools -- never block on it.
-1. **Discover** -- call ``search_tables`` (or ``introspect_schema`` if the \
+1. **Discover** -- use the supplied database context, then call ``search_tables`` \
+   (or ``introspect_schema`` if the \
    database has no curated hints) to find candidate tables.
 2. **Inspect** -- call ``search_columns`` on the candidates to confirm the \
    columns and data types you need.
@@ -112,9 +104,8 @@ the results.
 - If a query returns zero rows, automatically broaden the filter (e.g. \
   drop the most restrictive predicate, swap ``=`` for ``ILIKE``) and retry \
   once before telling the user there is no data.
-- When you grounded a term via ``retrieve_business_context``, briefly state \
-  which governed definition you applied and cite its source(s) so the answer \
-  is auditable. Never invent a definition the knowledge base did not return.
+- Treat uploaded context as guidance, but verify table and column names against \
+  live schema tools before executing SQL.
 
 ## Database extensions & advanced SQL (PostgreSQL)
 
@@ -129,8 +120,8 @@ connected server supports, then use ONLY those capabilities:
     ``ST_DWithin(geom::geography, ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)::geography, :metres)``.
   - Use ``ST_Distance`` for distances, ``ST_Within``/``ST_Contains`` for \
     containment, and ``ST_AsGeoJSON(geom)`` to return mappable geometry.
-  - Do NOT guess the SRID or geometry column -- confirm the project's spatial \
-    conventions with ``retrieve_business_context`` (Foundry IQ) when unsure.
+  - Do NOT guess the SRID or geometry column -- confirm it from the uploaded \
+    database context or live schema metadata.
 - **pgvector (semantic)** -- when the server has the ``vector`` extension and the \
   user wants rows similar in *meaning* (e.g. "products like this description"), \
   prefer the ``semantic_data_search`` tool over ``ILIKE``: it embeds the text \
@@ -144,7 +135,7 @@ answers.
 
 
 # ---------------------------------------------------------------------------
-# Behavioural rules used only by the GitHub Copilot agent (UI Copilot tab).
+# Behavioural rules used by the OpenAI Codex agent.
 # VSCode Copilot Chat manages its own loop, so the stdio server does not
 # need these. Rule 3 (forced ### Summary / ### Key Findings / ### Description
 # response format) is kept in a separate constant and gated by the
@@ -188,7 +179,7 @@ COPILOT_BEHAVIORAL_RULES = """
    to connect to the most appropriate one before proceeding. Do NOT tell the user \
    to go to Settings -- handle it yourself.
 
-6. Act like GitHub Copilot Chat: fast, autonomous, decisive. For greetings or non-database \
+6. Be fast, autonomous, and decisive. For greetings or non-database \
    questions, respond briefly and offer to help with the database. For database \
    questions, go straight to tool calls -- no preamble.
 

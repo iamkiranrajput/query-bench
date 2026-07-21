@@ -92,7 +92,7 @@ export interface TrustVerification {
   method_check: string;
 }
 
-/** A governed Foundry IQ definition cited in the answer. */
+/** Optional provenance attached to a grounded answer. */
 export interface GroundedSource {
   title: string;
   source: string;
@@ -166,24 +166,26 @@ export interface McpToolCallEntry {
   chainIndex?: number;
 }
 
-// ── Copilot / GitHub Models Integration ──────────────────────────
+// ── OpenAI Codex Models Integration ───────────────────────────────
 
 export interface CopilotModelInfo {
   id: string;
   name: string;
   vendor: string;
   context_window: number;
-}
-
-export interface CopilotConfigRequest {
-  github_token: string;
-  default_model: string;
+  supported_in_api?: boolean;
+  visibility?: 'list' | 'hide' | string;
 }
 
 export interface CopilotConfigResponse {
+  provider: 'openai_codex';
   configured: boolean;
   default_model: string;
   has_token: boolean;
+  has_codex_token: boolean;
+  codex_email: string;
+  codex_display_name: string;
+  codex_account_id: string;
 }
 
 export interface CopilotSshCredentials {
@@ -237,7 +239,7 @@ export interface CopilotChatResponse {
   grounded_sources?: GroundedSource[];
 }
 
-// ── GitHub OAuth Device Flow ─────────────────────────────────────
+// ── OpenAI Codex OAuth Device Flow ────────────────────────────────
 
 export interface DeviceFlowResponse {
   user_code: string;

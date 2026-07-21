@@ -52,6 +52,7 @@ server/ui/
 
 # Embedding cache (regenerated at startup from schema_hints.json)
 server/data/embedding_cache/
+server/data/user_contexts/
 
 # Robot repos (cloned for analysis, not part of the project)
 _robot_repos/

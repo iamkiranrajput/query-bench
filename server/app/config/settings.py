@@ -1,7 +1,7 @@
 """
 Application configuration loaded from environment variables.
 
-Only the fields required for the GitHub Copilot Chat + MCP tool surface are
+Only the fields required for the OpenAI Codex + MCP tool surface are
 declared here. Legacy ``.env`` files that still contain settings from older
 features are tolerated via ``extra = "ignore"``.
 """
@@ -22,12 +22,12 @@ class Settings(BaseSettings):
     """Type-safe access to runtime configuration."""
 
     # -- Application metadata ------------------------------------------------
-    app_name: str = Field(default="GitHub Copilot MCP SQL Assistant", alias="APP_NAME")
+    app_name: str = Field(default="OpenAI Codex SQL Query Bench", alias="APP_NAME")
     app_version: str = Field(default="2.0.0", alias="APP_VERSION")
 
     # -- Server / networking -------------------------------------------------
-    host: str = Field(default="0.0.0.0", alias="HOST")
-    port: int = Field(default=8000, alias="PORT")
+    host: str = Field(default="127.0.0.1", alias="HOST")
+    port: int = Field(default=2222, alias="PORT")
     debug: bool = Field(default=False, alias="DEBUG")
 
     @field_validator("debug", mode="before")
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
         return False
 
     # CORS allow-list (comma-separated). Used only outside DEBUG mode.
-    allowed_origins: str = Field(default="http://localhost:4200", alias="ALLOWED_ORIGINS")
+    allowed_origins: str = Field(default="http://localhost:1111", alias="ALLOWED_ORIGINS")
 
     # -- Logging -------------------------------------------------------------
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
@@ -83,7 +83,7 @@ class Settings(BaseSettings):
     # Default off -- keeps audit fidelity for the hackathon demo.
     query_log_redact_literals: bool = Field(default=False, alias="QUERY_LOG_REDACT_LITERALS")
 
-    # -- GitHub Copilot OAuth token storage ----------------------------------
+    # -- OpenAI Codex OAuth token storage ------------------------------------
     # Base64-encoded 32-byte AES-256 key used to encrypt
     # ``.copilot_token.json`` on non-Windows hosts (Windows uses DPAPI).
     # When this is empty and the host is not Windows, the token is NOT
@@ -92,8 +92,8 @@ class Settings(BaseSettings):
     #   python -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"
     copilot_token_enc_key: str = Field(default="", alias="COPILOT_TOKEN_ENC_KEY")
 
-    # Default Copilot model id (Models exposed via api.githubcopilot.com).
-    copilot_default_model: str = Field(default="claude-opus-4", alias="COPILOT_DEFAULT_MODEL")
+    # Default Codex model id (the live account model list can override it).
+    copilot_default_model: str = Field(default="gpt-5.6-sol", alias="COPILOT_DEFAULT_MODEL")
 
     # Agent-loop budget for the Copilot service.
     copilot_agent_wall_clock_seconds: float = Field(
@@ -105,47 +105,10 @@ class Settings(BaseSettings):
     # When True (default), the agent formats answers as an analyst-style
     # Insight Report / RCA (### Summary / ### Key Insights /
     # ### Root Cause Analysis / ### Recommendations). Set to False for
-    # free-form answers matching VS Code Copilot Chat.
+    # free-form answers matching an interactive Codex chat.
     copilot_structured_response: bool = Field(
         default=True, alias="COPILOT_STRUCTURED_RESPONSE"
     )
-
-    # -- Microsoft Foundry IQ knowledge grounding (Azure AI Search) ----------
-    # Optional. When configured, the ``retrieve_business_context`` MCP tool
-    # grounds the agent in a Foundry IQ Knowledge Base (governed business
-    # glossary, metric definitions, spatial/PostGIS conventions, data
-    # dictionary) built on Azure AI Search. When any required field is unset
-    # the tool degrades gracefully to a clear "not configured" message and the
-    # agent still completes using the local FAISS schema index — so the app
-    # runs identically with or without Azure credentials.
-    #
-    # Secrets are read from the environment only (never hard-coded). Provision
-    # the backing resources with the Microsoft IQ Series template:
-    #   https://aka.ms/iq-series/deploytoazure
-    azure_search_endpoint: str = Field(default="", alias="AZURE_SEARCH_ENDPOINT")
-    azure_search_api_key: str = Field(default="", alias="AZURE_SEARCH_API_KEY")
-    # Foundry IQ Knowledge Base (agentic-retrieval target) name.
-    foundry_knowledge_base_name: str = Field(
-        default="", alias="FOUNDRY_KNOWLEDGE_BASE_NAME"
-    )
-    # Azure AI Search index that backs the knowledge source (used by the
-    # ingest script and as a direct-search fallback when no knowledge base
-    # is configured).
-    foundry_search_index: str = Field(default="", alias="FOUNDRY_SEARCH_INDEX")
-    # Azure OpenAI used by the knowledge base for answer synthesis and by the
-    # ingest script for embeddings. Endpoint + key are optional; AAD
-    # (azure-identity) is used when the key is empty.
-    azure_openai_endpoint: str = Field(default="", alias="AZURE_OPENAI_ENDPOINT")
-    azure_openai_api_key: str = Field(default="", alias="AZURE_OPENAI_API_KEY")
-    azure_openai_embedding_deployment: str = Field(
-        default="text-embedding-3-large",
-        alias="AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
-    )
-    azure_openai_chat_deployment: str = Field(
-        default="gpt-4o-mini", alias="AZURE_OPENAI_CHAT_DEPLOYMENT"
-    )
-    # Number of grounded passages the retrieval tool returns by default.
-    foundry_retrieval_top_k: int = Field(default=5, alias="FOUNDRY_RETRIEVAL_TOP_K")
 
     # -- Preset database connection (optional) -------------------------------
     # Convenience for hackathon demos -- when set, the MCP stdio server and

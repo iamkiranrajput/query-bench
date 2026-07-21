@@ -3,7 +3,7 @@ Domain-knowledge MCP tools.
 
 After the cleanup only two generic context tools remain. They
 wrap the resource builders in ``app.mcp_server.resources`` so MCP clients
-that cannot read MCP Resources (e.g. the GitHub Copilot HTTP API) can
+that cannot read MCP Resources directly can
 still ask for high-level database context.
 
 The previous database-specific tools (``get_concept_mappings``,

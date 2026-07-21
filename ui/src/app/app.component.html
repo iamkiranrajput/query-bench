@@ -34,17 +34,18 @@
       ></app-data-analytics>
     </div>
 
-    <!-- Copilot Chat (MCP Agent) View -->
+    <!-- OpenAI Codex (MCP Agent) View -->
     <app-mcp-agent
       *ngIf="activeView === 'mcp-agent'"
       class="flex-1 overflow-hidden"
       [sessionId]="sessionId || ''"
     ></app-mcp-agent>
 
-    <!-- Governed Knowledge View (Bring-Your-Own-Governance) -->
+    <!-- Database Context Files View -->
     <app-knowledge-manager
       *ngIf="activeView === 'knowledge'"
       class="flex-1 overflow-hidden"
+      [sessionId]="sessionId || ''"
     ></app-knowledge-manager>
 
     <!-- Configuration View -->
@@ -358,7 +359,7 @@
               <mat-icon class="text-blue-500 !text-xl mt-0.5">auto_awesome</mat-icon>
               <div>
                 <p class="font-medium text-gray-700">AI Engine</p>
-                <p class="text-gray-500">GitHub Copilot (MCP)</p>
+                <p class="text-gray-500">OpenAI Codex (MCP)</p>
               </div>
             </div>
           </div>

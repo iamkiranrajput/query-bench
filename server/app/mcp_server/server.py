@@ -33,7 +33,6 @@ from .tools import (
     get_connection_profile,
     analyze_connection_performance,
     validate_server_compatibility,
-    retrieve_business_context,
     detect_extensions,
     semantic_data_search,
 )
@@ -53,7 +52,6 @@ from .tools.connect_database import TOOL_METADATA as CONNECT_DATABASE_META
 from .tools.get_connection_profile import TOOL_METADATA as CONN_PROFILE_META
 from .tools.analyze_connection_performance import TOOL_METADATA as ANALYZE_PERF_META
 from .tools.validate_server_compatibility import TOOL_METADATA as VALIDATE_COMPAT_META
-from .tools.retrieve_business_context import TOOL_METADATA as RETRIEVE_CONTEXT_META
 from .tools.detect_extensions import TOOL_METADATA as DETECT_EXTENSIONS_META
 from .tools.semantic_data_search import TOOL_METADATA as SEMANTIC_DATA_SEARCH_META
 from .tools.switch_database import (
@@ -262,15 +260,6 @@ class MCPServer:
             validate_server_compatibility
         )
 
-        # Knowledge grounding (Microsoft Foundry IQ). Grounds business terms in
-        # a governed, permission-aware knowledge base before SQL generation.
-        self._register_tool(
-            RETRIEVE_CONTEXT_META["name"],
-            RETRIEVE_CONTEXT_META["description"],
-            RETRIEVE_CONTEXT_META["parameters"],
-            retrieve_business_context
-        )
-
         # Database capability + advanced-SQL tools (Postgres extensions:
         # PostGIS spatial, pgvector semantic search).
         self._register_tool(
@@ -287,7 +276,7 @@ class MCPServer:
         )
 
         # Generic domain-context tools (mirror of the queryBench://*
-        # MCP Resources, exposed as tools so the GitHub Copilot agent --
+        # MCP Resources, exposed as tools so the OpenAI Codex agent --
         # which cannot read MCP Resources -- can still reach them).
         for tool_def in DOMAIN_TOOLS:
             self._register_tool(

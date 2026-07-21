@@ -1,8 +1,8 @@
 """
-GitHub Copilot MCP SQL Assistant - FastAPI Entry Point
+OpenAI Codex SQL Query Bench - FastAPI Entry Point
 
 Minimal backend that exposes:
-  * GitHub Copilot Chat agent loop (`/api/copilot/*`) backed by MCP tools.
+  * OpenAI Codex agent loop (`/api/copilot/*`) backed by MCP tools.
   * MCP tool surface for direct invocation from the UI (`/api/mcp/*`).
   * Database connection management (`/api/connect`, `/api/disconnect`, ...).
   * Health & monitoring endpoints.
@@ -105,7 +105,7 @@ async def lifespan(app: FastAPI):
     """FastAPI lifespan: validate config, warm the MCP schema index, dispose on shutdown."""
 
     logger.info("=" * 60)
-    logger.info("Starting GitHub Copilot MCP SQL Assistant")
+    logger.info("Starting OpenAI Codex SQL Query Bench")
 
     validate_configuration()
 
@@ -196,7 +196,7 @@ async def lifespan(app: FastAPI):
 
     elapsed_ms = (_time.perf_counter() - startup_start) * 1000
     logger.info(
-        "[OK] Server ready in %.0fms - Features: GitHub Copilot Chat | MCP Tools | DB Manager",
+        "[OK] Server ready in %.0fms - Features: OpenAI Codex | MCP Tools | DB Manager",
         elapsed_ms,
     )
     logger.info("API Docs: /api/docs | Monitoring: /api/monitoring/health")
@@ -207,7 +207,7 @@ async def lifespan(app: FastAPI):
     async with mcp_http_lifespan():
         yield
 
-    logger.info("Shutting down GitHub Copilot MCP SQL Assistant")
+    logger.info("Shutting down OpenAI Codex SQL Query Bench")
     try:
         await _shutdown_resources()
     except Exception as exc:  # noqa: BLE001
@@ -279,9 +279,9 @@ async def _shutdown_resources(force: bool = False) -> None:
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="GitHub Copilot MCP SQL Assistant",
+    title="OpenAI Codex SQL Query Bench",
     description=(
-        "Natural-language SQL assistant powered by GitHub Copilot Chat "
+        "Natural-language SQL assistant powered by OpenAI Codex "
         "models talking to a Model Context Protocol (MCP) tool surface."
     ),
     version="2.0.0",
@@ -300,9 +300,9 @@ setup_middleware(app)
 _env_origins = [o.strip() for o in (settings.allowed_origins or "").split(",") if o.strip()]
 if settings.debug:
     _dev_origins = [
-        "http://localhost:4200",
+        "http://localhost:1111",
+        "http://127.0.0.1:1111",
         "http://localhost:3000",
-        "http://127.0.0.1:4200",
         "http://127.0.0.1:3000",
         # MCP Inspector default ports (UI + proxy)
         "http://localhost:6274",
@@ -313,7 +313,7 @@ if settings.debug:
     _all_origins = list(dict.fromkeys(_dev_origins + _env_origins))
     _allow_origin_regex = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 else:
-    _all_origins = _env_origins if _env_origins else ["http://localhost:4200"]
+    _all_origins = _env_origins if _env_origins else ["http://localhost:1111"]
     _allow_origin_regex = None
 
 app.add_middleware(
@@ -347,8 +347,8 @@ app.include_router(database.router, prefix="/api", tags=["Database"])
 app.include_router(health.router, prefix="/api", tags=["Health"])
 app.include_router(monitoring_router, prefix="/api", tags=["Monitoring"])
 app.include_router(mcp_direct.router, prefix="/api", tags=["MCP Tools"])
-app.include_router(copilot_routes.router, prefix="/api", tags=["GitHub Copilot"])
-app.include_router(knowledge.router, prefix="/api", tags=["Governed Knowledge"])
+app.include_router(copilot_routes.router, prefix="/api", tags=["OpenAI Codex"])
+app.include_router(knowledge.router, prefix="/api", tags=["Database Context"])
 app.include_router(debug_logs.router, tags=["Debug Logs"])
 
 # MCP-over-HTTP transport (Streamable HTTP) -- mounted last so REST routes win.
@@ -366,7 +366,7 @@ async def root():
     cache_stats = cache_manager.get_stats()
 
     return {
-        "name": "GitHub Copilot MCP SQL Assistant",
+        "name": "OpenAI Codex SQL Query Bench",
         "version": "2.0.0",
         "status": "running",
         "docs": "/api/docs",
@@ -383,8 +383,8 @@ if __name__ == "__main__":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     _enable_reload = os.getenv("RELOAD", "false").lower() == "true"
-    _host = settings.host or "0.0.0.0"
-    _port = settings.port or 8000
+    _host = settings.host or "127.0.0.1"
+    _port = settings.port or 2222
 
     # Trust X-Forwarded-* headers when running behind a reverse proxy
     # (nginx, Azure Front Door, ...) so request.url.scheme is "https" and

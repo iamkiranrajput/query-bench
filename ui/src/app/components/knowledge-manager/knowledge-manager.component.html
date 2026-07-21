@@ -3,28 +3,52 @@
     <div>
       <h1 class="km-title">
         <mat-icon class="km-title-icon">menu_book</mat-icon>
-        Governed Knowledge
+        Database Context
       </h1>
       <p class="km-sub">
-        Business definitions that <strong>Microsoft Foundry IQ</strong> grounds the SQL agent in.
-        Tag each with a <strong>domain</strong> so one knowledge base can serve many databases.
+        Upload schema notes, business rules, metric definitions, example SQL, or a data dictionary.
+        Codex automatically includes these files when answering questions about the database.
       </p>
     </div>
     <div class="km-actions">
-      <button class="km-btn-ghost" (click)="refresh()" [disabled]="loading" title="Refresh">
+      <button class="km-btn-ghost" (click)="refreshContext()" [disabled]="contextUploading" title="Refresh">
         <mat-icon>refresh</mat-icon>
-      </button>
-      <button class="km-btn-primary" (click)="startCreate()" [disabled]="!configured">
-        <mat-icon>add</mat-icon> Add term
       </button>
     </div>
   </div>
 
-  <!-- Not-configured banner -->
-  <div *ngIf="!configured" class="km-banner km-banner-warn">
-    <mat-icon>info</mat-icon>
-    Foundry IQ is not configured. Set <code>AZURE_SEARCH_ENDPOINT</code> and
-    <code>FOUNDRY_SEARCH_INDEX</code> in the server <code>.env</code> to manage governed knowledge.
+  <div class="km-form">
+    <div class="km-card-head">
+      <mat-icon>upload_file</mat-icon>
+      <span class="km-card-title">Database context files</span>
+    </div>
+    <p class="km-sub">
+      Upload schema notes, business rules, metric definitions, example SQL, or a data dictionary.
+      Files are scoped to the connected database and included on the next AI turn.
+    </p>
+    <div class="km-form-grid">
+      <label class="km-field">
+        <span>Database name (only needed when disconnected)</span>
+        <input type="text" [(ngModel)]="contextDatabaseName" placeholder="e.g. analytics" />
+      </label>
+      <label class="km-field">
+        <span>Context file (.md, .txt, .json, .yaml, .csv, .sql; max 1 MB)</span>
+        <input type="file" accept=".md,.txt,.json,.yaml,.yml,.csv,.sql" (change)="uploadContext($event)" [disabled]="contextUploading" />
+      </label>
+    </div>
+    <div class="km-list" *ngIf="contextDocuments.length">
+      <div class="km-card" *ngFor="let doc of contextDocuments">
+        <div class="km-card-head">
+          <mat-icon>description</mat-icon>
+          <span class="km-card-title">{{ doc.filename }}</span>
+          <span class="km-tag km-tag-domain">{{ doc.database }}</span>
+          <span class="km-card-spacer"></span>
+          <button class="km-icon-btn km-danger" (click)="removeContext(doc)" title="Delete">
+            <mat-icon>delete</mat-icon>
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- Notices -->
@@ -35,92 +59,8 @@
     <mat-icon>error_outline</mat-icon> {{ error }}
   </div>
 
-  <!-- Domain filter chips -->
-  <div *ngIf="domains.length" class="km-chips">
-    <button class="km-chip" [class.active]="domainFilter === ''" (click)="domainFilter = ''">
-      All ({{ documents.length }})
-    </button>
-    <button
-      *ngFor="let d of domains"
-      class="km-chip"
-      [class.active]="domainFilter === d"
-      (click)="domainFilter = d"
-    >
-      {{ d }}
-    </button>
-  </div>
-
-  <!-- Edit / create form -->
-  <div *ngIf="editing" class="km-form">
-    <div class="km-form-grid">
-      <label class="km-field">
-        <span>Term / title <em>*</em></span>
-        <input type="text" [(ngModel)]="form.title" placeholder="e.g. Critical alarm (definition)" />
-      </label>
-      <label class="km-field">
-        <span>Domain</span>
-        <input type="text" [(ngModel)]="form.domain" placeholder="e.g. network, retail, finance" />
-      </label>
-      <label class="km-field">
-        <span>Category</span>
-        <input type="text" [(ngModel)]="form.category" placeholder="business-glossary" />
-      </label>
-      <label class="km-field">
-        <span>Source</span>
-        <input type="text" [(ngModel)]="form.source" placeholder="e.g. Network Ops Standard v1" />
-      </label>
-    </div>
-    <label class="km-field">
-      <span>Definition <em>*</em></span>
-      <textarea
-        rows="4"
-        [(ngModel)]="form.content"
-        placeholder="A CRITICAL alarm is a row WHERE severity = 1 (numeric)..."
-      ></textarea>
-    </label>
-    <div class="km-form-actions">
-      <button class="km-btn-ghost" (click)="cancelEdit()" [disabled]="saving">Cancel</button>
-      <button class="km-btn-primary" (click)="save()" [disabled]="saving">
-        <mat-spinner *ngIf="saving" diameter="16"></mat-spinner>
-        <span *ngIf="!saving">{{ form.id ? 'Update' : 'Add' }} term</span>
-        <span *ngIf="saving">Saving…</span>
-      </button>
-    </div>
-  </div>
-
-  <!-- Loading -->
-  <div *ngIf="loading" class="km-loading">
-    <mat-spinner diameter="22"></mat-spinner> Loading governed knowledge…
-  </div>
-
-  <!-- Empty -->
-  <div *ngIf="!loading && configured && !visibleDocuments.length" class="km-empty">
-    <mat-icon>menu_book</mat-icon>
-    <p>No governed terms{{ domainFilter ? ' for domain "' + domainFilter + '"' : '' }} yet.</p>
-    <button class="km-btn-primary" (click)="startCreate()">
-      <mat-icon>add</mat-icon> Add the first term
-    </button>
-  </div>
-
-  <!-- Document list -->
-  <div class="km-list" *ngIf="!loading && visibleDocuments.length">
-    <div class="km-card" *ngFor="let doc of visibleDocuments; trackBy: trackById">
-      <div class="km-card-head">
-        <span class="km-card-title">{{ doc.title }}</span>
-        <span *ngIf="doc.domain" class="km-tag km-tag-domain">{{ doc.domain }}</span>
-        <span *ngIf="doc.category" class="km-tag">{{ doc.category }}</span>
-        <span class="km-card-spacer"></span>
-        <button class="km-icon-btn" (click)="startEdit(doc)" title="Edit">
-          <mat-icon>edit</mat-icon>
-        </button>
-        <button class="km-icon-btn km-danger" (click)="remove(doc)" title="Delete">
-          <mat-icon>delete</mat-icon>
-        </button>
-      </div>
-      <p class="km-card-content">{{ doc.content }}</p>
-      <div *ngIf="doc.source" class="km-card-source">
-        <mat-icon>verified</mat-icon> {{ doc.source }}
-      </div>
-    </div>
+  <div *ngIf="!contextUploading && !contextDocuments.length" class="km-empty">
+    <mat-icon>description</mat-icon>
+    <p>No context files uploaded for this database yet.</p>
   </div>
 </div>

@@ -8,7 +8,6 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { ApiService } from '../../services/api.service';
 import { ComponentStateService } from '../../services/component-state.service';
 import { ThemeService } from '../../services/theme.service';
-import { McpAgentService } from '../../services/mcp-agent.service';
 
 import { Chart, registerables } from 'chart.js';
 import { DataTableComponent, TableColumn, PaginationConfig } from '../shared/data-table/data-table.component';
@@ -35,7 +34,6 @@ interface QueryLog {
   row_count: number;
   error_message: string | null;
   session_id: string | null;
-  github_username: string;
   intent: string | null;
   confidence: string | null;
   tables_used: string[];
@@ -69,14 +67,13 @@ export class DashboardComponent implements OnInit, OnDestroy, OnChanges, AfterVi
   @Input() dbIdentity: string = '';
   @Input() sessionId: string | null = null;
 
-  // Data — MCP Agent (GitHub Copilot) query logs
+  // Data — OpenAI Codex query logs
   logs: QueryLog[] = [];
   filteredLogs: QueryLog[] = [];
   paginatedLogs: QueryLog[] = [];
   loading = true;
   error: string | null = null;
 
-  githubUsername = '';
   recalculating = false;
 
   // Filters
@@ -113,7 +110,6 @@ export class DashboardComponent implements OnInit, OnDestroy, OnChanges, AfterVi
       statusConfig: { successValue: 'success', successIcon: 'check_circle', failureIcon: 'cancel' }
     },
     { key: 'user_query', label: 'Query', type: 'text' },
-    { key: 'github_username', label: 'User', type: 'text', width: '120px' },
     { key: 'row_count', label: 'Rows', type: 'number', width: '70px', align: 'right' },
     {
       key: 'total_time_formatted', label: 'Time', type: 'text', width: '90px', align: 'right',
@@ -160,19 +156,12 @@ export class DashboardComponent implements OnInit, OnDestroy, OnChanges, AfterVi
   // Detail modal
   selectedLog: QueryLog | null = null;
 
-  constructor(private apiService: ApiService, private componentState: ComponentStateService, private themeService: ThemeService, private mcpAgentService: McpAgentService) {}
+  constructor(private apiService: ApiService, private componentState: ComponentStateService, private themeService: ThemeService) {}
 
   ngOnInit(): void {
     this.loadData();
     this.refreshInterval = setInterval(() => this.loadData(), 30000);
 
-    // Track GitHub username and reload when it becomes available
-    this.mcpAgentService.githubUser$.subscribe(u => {
-      if (u?.username && u.username !== this.githubUsername) {
-        this.githubUsername = u.username;
-        this.loadData();
-      }
-    });
   }
 
   ngOnChanges(changes: SimpleChanges): void {
@@ -194,7 +183,7 @@ export class DashboardComponent implements OnInit, OnDestroy, OnChanges, AfterVi
     this.loading = true;
     this.error = null;
 
-    this.apiService.getCopilotExecutionLogs(10000, this.githubUsername).subscribe({
+    this.apiService.getCopilotExecutionLogs(10000).subscribe({
       next: (res) => {
         if (res.success && res.logs) {
           this.logs = res.logs.map((l: any) => ({
@@ -209,7 +198,6 @@ export class DashboardComponent implements OnInit, OnDestroy, OnChanges, AfterVi
             })),
             total_time_formatted: l.total_time_formatted || (l.total_time_ms >= 1000 ? `${(l.total_time_ms / 1000).toFixed(1)}s` : `${Math.round(l.total_time_ms)}ms`),
             error_message: l.error_message || l.error || null,
-            github_username: l.github_username || '',
             token_usage: l.token_usage && l.token_usage.total_tokens > 0 ? l.token_usage : null,
             token_display: l.token_usage?.total_tokens ? this.formatTokenCount(l.token_usage.total_tokens) : '',
             model_display: l.token_usage?.model || l.model || '',
@@ -240,8 +228,7 @@ export class DashboardComponent implements OnInit, OnDestroy, OnChanges, AfterVi
       result = result.filter(l =>
         l.user_query.toLowerCase().includes(term) ||
         (l.generated_sql || '').toLowerCase().includes(term) ||
-        (l.error_message || '').toLowerCase().includes(term) ||
-        (l.github_username || '').toLowerCase().includes(term)
+        (l.error_message || '').toLowerCase().includes(term)
       );
     }
 
@@ -715,17 +702,6 @@ export class DashboardComponent implements OnInit, OnDestroy, OnChanges, AfterVi
       'o3-mini':              [1.10,  4.40],
       'o1-mini':              [3.00,  12.00],
       'o1':                   [15.00, 60.00],
-      'gemini-2.5-flash':     [0.30,  2.50],
-      'gemini-2.5-pro':       [1.25,  10.00],
-      'gemini-3.1-flash-lite':[0.25,  1.50],
-      'claude-opus-4.7':      [5.00,  25.00],
-      'claude-opus-4-7':      [5.00,  25.00],
-      'claude-opus-4':        [15.00, 75.00],
-      'claude-sonnet-4':      [3.00,  15.00],
-      'claude-haiku-4':       [1.00,  5.00],
-      'claude-3-opus':        [15.00, 75.00],
-      'claude-3-sonnet':      [3.00,  15.00],
-      'claude-3-haiku':       [0.25,  1.25],
     };
     const model = (usage.model || '').toLowerCase();
     let rates = pricing['gpt-4o-mini'];
